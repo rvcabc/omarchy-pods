@@ -159,3 +159,33 @@ openpods_add_test(tst_blemanager
 )
 # Only test that parses a QBluetoothDeviceInfo, so only one needing the module.
 target_link_libraries(tst_blemanager PRIVATE Qt6::Bluetooth)
+
+openpods_add_test(tst_modecycle
+    tst_modecycle.cpp
+    ../modecycle.hpp
+)
+
+openpods_add_test(tst_metadata
+    tst_metadata.cpp
+    ../metadata.hpp
+)
+
+openpods_add_test(tst_conversationlevel
+    tst_conversationlevel.cpp
+    ../conversationlevel.hpp
+)
+
+openpods_add_test(tst_controlcommandstate
+    tst_controlcommandstate.cpp
+    ../controlcommandstate.hpp
+)
+
+openpods_add_test(tst_settingsreassert
+    tst_settingsreassert.cpp
+    ../settingsreassert.hpp
+)
+
+openpods_add_test(tst_verbtable
+    tst_verbtable.cpp
+    ../verbtable.hpp
+)

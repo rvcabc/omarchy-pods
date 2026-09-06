@@ -9,6 +9,7 @@
 #include <QStyleHints>
 #include <QPalette>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QSocketNotifier>
 #include <QQmlContext>
@@ -49,6 +50,11 @@
 #include "systemsleepmonitor.hpp"
 #include "controlreconnect.hpp"
 #include "scanduty.hpp"
+#include "controlcommandstate.hpp"
+#include "metadata.hpp"
+#include "modecycle.hpp"
+#include "verbtable.hpp"
+#include "settingsreassert.hpp"
 
 using namespace AirpodsTrayApp::Enums;
 
@@ -279,10 +285,11 @@ public slots:
     // the daemon hasn't learned an address yet (initial pairing not
     // done). The connect path also triggers the existing
     // bluezDeviceConnected handler, which re-runs the AAP handshake.
-    void disconnectAirPods() {
+    // Setters answer with the refusal text a verb prints, or an empty string once the request went out.
+    QString disconnectAirPods() {
         if (!m_deviceInfo || m_deviceInfo->bluetoothAddress().isEmpty()) {
             LOG_WARN("disconnectAirPods: no current address to disconnect");
-            return;
+            return QStringLiteral("no AirPods address is known yet");
         }
         const QString addr = m_deviceInfo->bluetoothAddress();
         LOG_INFO("disconnectAirPods: " << addr);
@@ -304,12 +311,13 @@ public slots:
                     proc->deleteLater();
                 });
         proc->start("bluetoothctl", QStringList() << "disconnect" << addr);
+        return {};
     }
 
-    void connectAirPods() {
+    QString connectAirPods() {
         if (!m_deviceInfo || m_deviceInfo->bluetoothAddress().isEmpty()) {
             LOG_WARN("connectAirPods: no current address to connect");
-            return;
+            return QStringLiteral("no AirPods address is known yet");
         }
         const QString addr = m_deviceInfo->bluetoothAddress();
         LOG_INFO("connectAirPods: " << addr);
@@ -330,6 +338,7 @@ public slots:
                     proc->deleteLater();
                 });
         proc->start("bluetoothctl", QStringList() << "connect" << addr);
+        return {};
     }
 
     // Apple "Forget This Device" parity. Walks bluetoothctl with the
@@ -340,10 +349,10 @@ public slots:
     // Async (own QProcess + deleteLater on finish) so we don't block
     // the Qt event loop on bluetoothctl's IO. The address comes from
     // DeviceInfo; refuses if no device is currently associated.
-    void forgetDevice() {
+    QString forgetDevice() {
         if (!m_deviceInfo || m_deviceInfo->bluetoothAddress().isEmpty()) {
             LOG_WARN("forgetDevice: no current device address to forget");
-            return;
+            return QStringLiteral("no AirPods address is known yet");
         }
         const QString addr = m_deviceInfo->bluetoothAddress();
         LOG_INFO("Forgetting device: " << addr);
@@ -361,6 +370,7 @@ public slots:
                     proc->deleteLater();
                 });
         proc->start("bluetoothctl", QStringList() << "remove" << addr);
+        return {};
     }
 
     void connectToDevice(const QString &address) {
@@ -370,26 +380,57 @@ public slots:
         connectToDevice(device);
     }
 
-    void setNoiseControlMode(NoiseControlMode mode)
+    // The pods ignore a mode the model lacks without a reply, so the refusal has to come from here.
+    QString refusalForMode(NoiseControlMode mode) const
     {
+        const AirPodsModel model = m_deviceInfo->model();
+        // An unknown model keeps every mode, the same fail-open choice supportsNoiseControl makes.
+        if (model == AirPodsModel::Unknown) {
+            return {};
+        }
+        const QString name = modelDisplayName(model);
+        if (!supportsNoiseControl(model)) {
+            return QStringLiteral("%1 has no listening modes").arg(name);
+        }
+        if (mode == NoiseControlMode::Off && !supportsNoiseOff(model)) {
+            return QStringLiteral("%1 has no Off listening mode").arg(name);
+        }
+        if (mode == NoiseControlMode::Adaptive && !supportsAdaptiveAudio(model)) {
+            return QStringLiteral("%1 has no Adaptive listening mode").arg(name);
+        }
+        return {};
+    }
+
+    QString setNoiseControlMode(NoiseControlMode mode)
+    {
+        if (!m_deviceInfo) {
+            return QStringLiteral("device info is not ready");
+        }
+        if (const QString refusal = refusalForMode(mode); !refusal.isEmpty()) {
+            LOG_WARN("Refusing listening mode " << static_cast<int>(mode) << ": " << refusal);
+            return refusal;
+        }
         if (m_deviceInfo->noiseControlMode() == mode)
         {
             LOG_DEBUG("Noise control mode is already set to: " << static_cast<int>(mode));
-            return;
+            return {};
         }
         LOG_INFO("Setting noise control mode to: " << mode);
         QByteArray packet = AirPodsPackets::NoiseControl::getPacketForMode(mode);
-        writePacketToSocket(packet, "Noise control mode packet written: ");
+        if (!writePacketToSocket(packet, "Noise control mode packet written: ")) {
+            return QStringLiteral("AirPods control link is not connected");
+        }
         ++m_noiseControlChangesTotal;
+        return {};
     }
-    void setNoiseControlModeInt(int mode)
+    QString setNoiseControlModeInt(int mode)
     {
         if (mode < 0 || mode > static_cast<int>(NoiseControlMode::Adaptive))
         {
             LOG_ERROR("Invalid noise control mode: " << mode);
-            return;
+            return QStringLiteral("listening mode %1 is out of range").arg(mode);
         }
-        setNoiseControlMode(static_cast<NoiseControlMode>(mode));
+        return setNoiseControlMode(static_cast<NoiseControlMode>(mode));
     }
 
     // Walk every battery source on each battery-status change and
@@ -436,58 +477,69 @@ public slots:
     // "noise:cycle" IPC verb so other surfaces (keyboard shortcuts,
     // openpods-ctl) can reuse the rotation without duplicating the
     // state machine.
-    void cycleNoiseControlMode()
+    QString cycleNoiseControlMode()
     {
         if (!m_deviceInfo)
         {
             LOG_ERROR("Cannot cycle noise control mode: device info not ready");
-            return;
+            return QStringLiteral("device info is not ready");
         }
+        const AirPodsModel model = m_deviceInfo->model();
         const int current = static_cast<int>(m_deviceInfo->noiseControlMode());
-        const int next = (current + 1) % (static_cast<int>(NoiseControlMode::Adaptive) + 1);
-        setNoiseControlModeInt(next);
+        const int next = OpenPods::nextNoiseMode(current, supportsNoiseOff(model), supportsAdaptiveAudio(model));
+        return setNoiseControlModeInt(next);
     }
 
-    void setConversationalAwareness(bool enabled)
+    QString setConversationalAwareness(bool enabled)
     {
         if (!m_deviceInfo) {
             LOG_WARN("setConversationalAwareness: m_deviceInfo not ready");
-            return;
+            return QStringLiteral("device info is not ready");
+        }
+        const AirPodsModel model = m_deviceInfo->model();
+        if (model != AirPodsModel::Unknown && !supportsConversationalAwareness(model)) {
+            return QStringLiteral("%1 has no Conversation Awareness").arg(modelDisplayName(model));
         }
         if (m_deviceInfo->conversationalAwareness() == enabled) {
             LOG_DEBUG("Conversational awareness already " << (enabled ? "enabled" : "disabled"));
-            return;
+            return {};
         }
         LOG_INFO("Setting conversational awareness to: " << (enabled ? "enabled" : "disabled"));
         QByteArray packet = enabled ? AirPodsPackets::ConversationalAwareness::ENABLED
                                     : AirPodsPackets::ConversationalAwareness::DISABLED;
 
-        writePacketToSocket(packet, "Conversational awareness packet written: ");
+        if (!writePacketToSocket(packet, "Conversational awareness packet written: ")) {
+            return QStringLiteral("AirPods control link is not connected");
+        }
         m_deviceInfo->setConversationalAwareness(enabled);
         ++m_caChangesTotal;
+        return {};
     }
 
-    void setOneBudANCMode(bool enabled)
+    QString setOneBudANCMode(bool enabled)
     {
+        const AirPodsModel model = m_deviceInfo->model();
+        if (model != AirPodsModel::Unknown && !supportsOneBudANC(model)) {
+            return QStringLiteral("%1 has no One-Bud ANC").arg(modelDisplayName(model));
+        }
         if (m_deviceInfo->oneBudANCMode() == enabled)
         {
             LOG_DEBUG("One Bud ANC mode is already " << (enabled ? "enabled" : "disabled"));
-            return;
+            return {};
         }
 
         LOG_INFO("Setting One Bud ANC mode to: " << (enabled ? "enabled" : "disabled"));
         QByteArray packet = enabled ? AirPodsPackets::OneBudANCMode::ENABLED
                                     : AirPodsPackets::OneBudANCMode::DISABLED;
 
-        if (writePacketToSocket(packet, "One Bud ANC mode packet written: "))
-        {
-            m_deviceInfo->setOneBudANCMode(enabled);
-            ++m_oneBudANCChangesTotal;
-        }
-        else
+        if (!writePacketToSocket(packet, "One Bud ANC mode packet written: "))
         {
             LOG_ERROR("Failed to send One Bud ANC mode command: socket not open");
+            return QStringLiteral("AirPods control link is not connected");
         }
+        m_deviceInfo->setOneBudANCMode(enabled);
+        ++m_oneBudANCChangesTotal;
+        return {};
     }
 
     void setRetryAttempts(int attempts)
@@ -512,16 +564,26 @@ public slots:
         writePacketToSocket(AirPodsPackets::MagicPairing::REQUEST_MAGIC_CLOUD_KEYS, "Magic Pairing packet written: ");
     }
 
-    void setAdaptiveNoiseLevel(int level)
+    QString setAdaptiveNoiseLevel(int level)
     {
         level = qBound(0, level, 100);
-        if (m_deviceInfo->adaptiveNoiseLevel() != level && m_deviceInfo->adaptiveModeActive())
+        // The pods accept the level only in Adaptive, so outside it the verb is refused rather than swallowed.
+        if (!m_deviceInfo->adaptiveModeActive())
         {
-            QByteArray packet = AirPodsPackets::AdaptiveNoise::getPacket(level);
-            writePacketToSocket(packet, "Adaptive noise level packet written: ");
-            m_deviceInfo->setAdaptiveNoiseLevel(level);
-            ++m_adaptiveLevelChangesTotal;
+            return QStringLiteral("adaptive level applies only while noise_mode is adaptive");
         }
+        if (m_deviceInfo->adaptiveNoiseLevel() == level)
+        {
+            return {};
+        }
+        QByteArray packet = AirPodsPackets::AdaptiveNoise::getPacket(level);
+        if (!writePacketToSocket(packet, "Adaptive noise level packet written: "))
+        {
+            return QStringLiteral("AirPods control link is not connected");
+        }
+        m_deviceInfo->setAdaptiveNoiseLevel(level);
+        ++m_adaptiveLevelChangesTotal;
+        return {};
     }
 
     void renameAirPods(const QString &newName)
@@ -846,6 +908,28 @@ private slots:
                                  QStringLiteral("BlueZ disconnect event"));
     }
 
+    // Apple devices overwrite the sticky settings on every connect, so the persisted wish is sent again after the echo burst.
+    void reassertStickySettings()
+    {
+        if (!areAirpodsConnected() || !m_settings) {
+            return;
+        }
+        for (const quint8 id : OpenPods::Reassert::desiredIds(*m_settings)) {
+            if (!OpenPods::Reassert::isSticky(id)) {
+                continue;
+            }
+            const auto desired = OpenPods::Reassert::loadDesired(*m_settings, id);
+            if (!desired) {
+                continue;
+            }
+            const auto echoed = m_controlCommands.payload(id);
+            if (const auto frame = OpenPods::Reassert::reassertFor(id, *desired, echoed)) {
+                LOG_INFO(OpenPods::Reassert::reassertLogLine(id, echoed, *desired));
+                writePacketToSocket(*frame, "Re-asserted setting packet written: ");
+            }
+        }
+    }
+
     void finalizeDeviceDisconnected(const QString &address)
     {
         if (m_disconnectFinalized) {
@@ -855,6 +939,7 @@ private slots:
         m_controlReconnectTimer->stop();
         m_controlRecovery.cancel();
         m_retryCount = 0;
+        m_controlCommands.clear();
 
         if (phoneSocket && phoneSocket->isOpen())
         {
@@ -1047,45 +1132,20 @@ private slots:
 
     void parseMetadata(const QByteArray &data)
     {
-        // Verify the data starts with the METADATA header
-        if (!data.startsWith(AirPodsPackets::Parse::METADATA))
+        const OpenPods::MetadataParse parsed = OpenPods::parseMetadata(data);
+        if (!parsed.ok)
         {
-            LOG_ERROR("Invalid metadata packet: Incorrect header");
+            LOG_ERROR("Invalid metadata packet: " << parsed.error);
             return;
         }
-
-        int pos = AirPodsPackets::Parse::METADATA.size(); // Start after the header
-
-        // Check if there is enough data to skip the initial bytes (based on example structure)
-        if (data.size() < pos + 6)
-        {
-            LOG_ERROR("Metadata packet too short to parse initial bytes");
-            return;
-        }
-        pos += 6; // Skip 6 bytes after the header as per example structure
-
-        auto extractString = [&data, &pos]() -> QString
-        {
-            if (pos >= data.size())
-            {
-                return QString();
-            }
-            int start = pos;
-            while (pos < data.size() && data.at(pos) != '\0')
-            {
-                ++pos;
-            }
-            QString str = QString::fromUtf8(data.mid(start, pos - start));
-            if (pos < data.size())
-            {
-                ++pos; // Move past the null terminator
-            }
-            return str;
-        };
-
-        m_deviceInfo->setDeviceName(extractString());
-        m_deviceInfo->setModelNumber(extractString());
-        m_deviceInfo->setManufacturer(extractString());
+        m_deviceInfo->setDeviceName(parsed.value.name);
+        m_deviceInfo->setModelNumber(parsed.value.modelNumber);
+        m_deviceInfo->setManufacturer(parsed.value.manufacturer);
+        m_deviceInfo->setSerialNumber(parsed.value.serialNumber);
+        m_deviceInfo->setFirmwareVersion(parsed.value.firmwareVersion);
+        m_deviceInfo->setHardwareRevision(parsed.value.hardwareRevision);
+        m_deviceInfo->setLeftSerial(parsed.value.leftSerial);
+        m_deviceInfo->setRightSerial(parsed.value.rightSerial);
 
         m_deviceInfo->setModel(parseModelNumber(m_deviceInfo->modelNumber()));
         emit modelChanged();
@@ -1103,6 +1163,7 @@ private slots:
         LOG_INFO("Parsed AirPods metadata:");
         LOG_INFO("Device Name: " << m_deviceInfo->deviceName());
         LOG_INFO("Model Number: " << m_deviceInfo->modelNumber());
+        LOG_INFO("Firmware: " << m_deviceInfo->firmwareVersion() << " hardware " << m_deviceInfo->hardwareRevision());
         LOG_INFO("Manufacturer: " << m_deviceInfo->manufacturer());
     }
 
@@ -1265,6 +1326,13 @@ private slots:
     {
         LOG_DEBUG("Received: " << data.toHex());
 
+        // Every control command is recorded before the chain below, so a later feature can prove its echo.
+        const OpenPods::ControlCommandState::Recorded recorded = m_controlCommands.record(data);
+        if (recorded.warning)
+        {
+            LOG_WARN(*recorded.warning);
+        }
+
         if (data.startsWith(AirPodsPackets::Parse::HANDSHAKE_ACK))
         {
             writePacketToSocket(AirPodsPackets::Connection::SET_SPECIFIC_FEATURES, "Set specific features packet written: ");
@@ -1277,6 +1345,9 @@ private slots:
                 if (m_deviceInfo->batteryStatus().isEmpty()) {
                     writePacketToSocket(AirPodsPackets::Connection::REQUEST_NOTIFICATIONS, "Request notifications packet written: ");
                 }
+            });
+            QTimer::singleShot(OpenPods::Reassert::reassertAfterNotificationsMs, this, [this]() {
+                reassertStickySettings();
             });
         }
         // Magic Cloud Keys Response
@@ -1675,6 +1746,9 @@ private:
     int m_oneBudANCChangesTotal = 0;
     int m_reopenCallsTotal = 0;
 
+    // Every control command the pods echoed this session, keyed by id.
+    OpenPods::ControlCommandState m_controlCommands;
+
     // Low-battery notification latches per battery source. State +
     // hysteresis live in LowBatteryLatch (see lowbatterywatcher.hpp);
     // tst_lowbatterywatcher.cpp exhaustively covers the trip/reset
@@ -1712,22 +1786,24 @@ public:
         status.insert("device_name", d ? d->deviceName() : QString());
         status.insert("noise_mode", d ? d->noiseControlModeInt() : -1);
         if (b) {
-            auto pod = [&](bool avail, int level, bool charging, bool inEar) {
+            auto pod = [&](bool avail, int level, bool charging, bool optimized, bool inEar) {
                 QJsonObject o;
                 o.insert("available", avail);
                 o.insert("level", level);
                 o.insert("charging", charging);
+                o.insert("optimized_charging", optimized);
                 o.insert("in_ear", inEar);
                 return o;
             };
             status.insert("left",  pod(b->isLeftPodAvailable(),  b->getLeftPodLevel(),
-                                       b->isLeftPodCharging(),   d->isLeftPodInEar()));
+                                       b->isLeftPodCharging(),   b->isLeftPodOptimizedCharging(),  d->isLeftPodInEar()));
             status.insert("right", pod(b->isRightPodAvailable(), b->getRightPodLevel(),
-                                       b->isRightPodCharging(),  d->isRightPodInEar()));
+                                       b->isRightPodCharging(),  b->isRightPodOptimizedCharging(), d->isRightPodInEar()));
             QJsonObject caseObj;
             caseObj.insert("available", b->isCaseAvailable());
             caseObj.insert("level",    b->getCaseLevel());
             caseObj.insert("charging", b->isCaseCharging());
+            caseObj.insert("optimized_charging", b->isCaseOptimizedCharging());
             status.insert("case", caseObj);
             // A Max reports one battery in Component::Headset, which left, right and case cannot express.
             QJsonObject headsetObj;
@@ -1769,6 +1845,18 @@ public:
         // map, model_name will be empty but model_number stays
         // populated so the user can file the missing variant.
         status.insert("model_number", d ? d->modelNumber() : QString());
+        status.insert("firmware_version", d ? d->firmwareVersion() : QString());
+        status.insert("serial_number", d ? d->serialNumber() : QString());
+        status.insert("hardware_revision", d ? d->hardwareRevision() : QString());
+        status.insert("left_serial", d ? d->leftSerial() : QString());
+        status.insert("right_serial", d ? d->rightSerial() : QString());
+        status.insert("hearing_aid", d ? d->hearingAidEnabled() : false);
+        // Evidence of which control commands echoed this session, not a list of settings.
+        QJsonArray idsSeen;
+        for (const quint8 id : m_controlCommands.idsSeen()) {
+            idsSeen.append(QStringLiteral("0x%1").arg(id, 2, 16, QLatin1Char('0')).toUpper().replace(QStringLiteral("0X"), QStringLiteral("0x")));
+        }
+        status.insert("control_ids_seen", idsSeen);
         // 0 = PauseWhenOneRemoved, 1 = PauseWhenBothRemoved,
         // 2 = Disabled (matches MediaController::EarDetectionBehavior).
         status.insert("ear_detection_behavior", earDetectionBehavior());
@@ -2066,83 +2154,74 @@ int main(int argc, char *argv[]) {
 
         QObject::connect(clientSocket, &QLocalSocket::readyRead,
                          clientSocket, [clientSocket, enginePtr, trayAppPtr]() {
-            QString msg = clientSocket->readAll();
-            if (msg == "reopen") {
+            const QString msg = clientSocket->readAll();
+            // Syntax lives in verbtable.hpp; a refusal from a setter is the reason the pods or the model gave.
+            const OpenPods::Ipc::Parsed parsed = OpenPods::Ipc::parseVerb(msg);
+            if (!parsed.ok) {
+                LOG_ERROR("Rejected IPC message: " << msg);
+                clientSocket->write(parsed.reply);
+                clientSocket->flush();
+                clientSocket->disconnectFromServer();
+                return;
+            }
+            QString refusal;
+            if (parsed.verb == QLatin1String("reopen")) {
                 trayAppPtr->incReopenCallsTotal();
                 // A headless daemon has no window, and the caller deserves an answer rather than silence.
                 if (!enginePtr) {
                     LOG_WARN("Refusing reopen: this daemon runs headless");
-                    clientSocket->write("error: this daemon runs headless and has no window\n");
-                    clientSocket->flush();
-                    clientSocket->disconnectFromServer();
-                    return;
-                }
-                LOG_INFO("Reopening app window");
-                const auto roots = enginePtr->rootObjects();
-                if (!roots.isEmpty()) {
-                    QMetaObject::invokeMethod(roots.first(), "reopen", Q_ARG(QVariant, "app"));
+                    refusal = QStringLiteral("this daemon runs headless and has no window");
                 } else {
-                    trayAppPtr->loadMainModule();
+                    LOG_INFO("Reopening app window");
+                    const auto roots = enginePtr->rootObjects();
+                    if (!roots.isEmpty()) {
+                        QMetaObject::invokeMethod(roots.first(), "reopen", Q_ARG(QVariant, "app"));
+                    } else {
+                        trayAppPtr->loadMainModule();
+                    }
                 }
-            } else if (msg == "noise:off") {
-                trayAppPtr->setNoiseControlModeInt(0);
-            } else if (msg == "noise:anc") {
-                trayAppPtr->setNoiseControlModeInt(1);
-            } else if (msg == "noise:transparency") {
-                trayAppPtr->setNoiseControlModeInt(2);
-            } else if (msg == "noise:adaptive") {
-                trayAppPtr->setNoiseControlModeInt(3);
-            } else if (msg == "noise:cycle") {
-                trayAppPtr->cycleNoiseControlMode();
-            } else if (msg == "ear:off") {
-                // Disable auto-pause/resume entirely. macOS Settings >
-                // AirPods > Automatic Ear Detection off-switch parity.
-                trayAppPtr->setEarDetectionBehavior(
-                    static_cast<int>(MediaController::EarDetectionBehavior::Disabled));
-            } else if (msg == "ear:one") {
-                trayAppPtr->setEarDetectionBehavior(
-                    static_cast<int>(MediaController::EarDetectionBehavior::PauseWhenOneRemoved));
-            } else if (msg == "ear:both") {
-                trayAppPtr->setEarDetectionBehavior(
-                    static_cast<int>(MediaController::EarDetectionBehavior::PauseWhenBothRemoved));
-            } else if (msg == "forget") {
-                trayAppPtr->forgetDevice();
-            } else if (msg == "ca:on") {
-                trayAppPtr->setConversationalAwareness(true);
-            } else if (msg == "ca:off") {
-                trayAppPtr->setConversationalAwareness(false);
-            } else if (msg == "disconnect") {
-                trayAppPtr->disconnectAirPods();
-            } else if (msg == "connect") {
-                trayAppPtr->connectAirPods();
-            } else if (msg == "onebud:on") {
-                trayAppPtr->setOneBudANCMode(true);
-            } else if (msg == "onebud:off") {
-                trayAppPtr->setOneBudANCMode(false);
-            } else if (msg.startsWith("adaptive:")) {
-                // `adaptive:N` where N is 0-100. Setter is no-op if
-                // noise mode isn't Adaptive (3) — the daemon refuses
-                // to push the packet when the user isn't actually in
-                // Adaptive mode, so the verb is safe to fire blindly
-                // from automation. Pure parser is in ipcverb.hpp +
-                // unit-tested in tst_ipcverb so malformed input
-                // (negative, out-of-range, non-numeric, whitespace)
-                // is rejected before reaching the setter.
-                if (auto level = OpenPods::Ipc::parseIntVerb(msg, QStringLiteral("adaptive:"))) {
-                    trayAppPtr->setAdaptiveNoiseLevel(*level);
-                }
-            } else if (msg == "status") {
-                // Read-only status snapshot. One-line JSON; the consumer
-                // (Quickshell tile, status bar) doesn't need to keep its
-                // own state machine. Schema is additive — never rename
-                // or remove a key without bumping a version field.
+            } else if (parsed.verb == QLatin1String("status")) {
+                // Schema is additive: never rename or remove a key without bumping schema_version.
                 const QJsonObject status = trayAppPtr->statusJson();
                 const QByteArray line = QJsonDocument(status).toJson(QJsonDocument::Compact) + "\n";
                 clientSocket->write(line);
                 clientSocket->flush();
+                clientSocket->disconnectFromServer();
+                return;
+            } else if (parsed.verb == QLatin1String("noise")) {
+                refusal = parsed.choice == QLatin1String("cycle") ? trayAppPtr->cycleNoiseControlMode()
+                                                                   : trayAppPtr->setNoiseControlModeInt(parsed.number);
+            } else if (parsed.verb == QLatin1String("ear")) {
+                // The choice order off, one, both maps onto Disabled, PauseWhenOneRemoved, PauseWhenBothRemoved.
+                static const MediaController::EarDetectionBehavior behaviors[] = {
+                    MediaController::EarDetectionBehavior::Disabled,
+                    MediaController::EarDetectionBehavior::PauseWhenOneRemoved,
+                    MediaController::EarDetectionBehavior::PauseWhenBothRemoved};
+                trayAppPtr->setEarDetectionBehavior(static_cast<int>(behaviors[parsed.number]));
+            } else if (parsed.verb == QLatin1String("forget")) {
+                refusal = trayAppPtr->forgetDevice();
+            } else if (parsed.verb == QLatin1String("ca")) {
+                refusal = trayAppPtr->setConversationalAwareness(parsed.choice == QLatin1String("on"));
+            } else if (parsed.verb == QLatin1String("disconnect")) {
+                refusal = trayAppPtr->disconnectAirPods();
+            } else if (parsed.verb == QLatin1String("connect")) {
+                refusal = trayAppPtr->connectAirPods();
+            } else if (parsed.verb == QLatin1String("onebud")) {
+                refusal = trayAppPtr->setOneBudANCMode(parsed.choice == QLatin1String("on"));
+            } else if (parsed.verb == QLatin1String("adaptive")) {
+                refusal = trayAppPtr->setAdaptiveNoiseLevel(parsed.number);
             } else {
-                LOG_ERROR("Unknown message received: " << msg);
+                // The table and this adapter must list the same families, so a miss here is a build defect, not a user error.
+                LOG_ERROR("Verb has a table row but no handler: " << parsed.verb);
+                refusal = QStringLiteral("verb %1 has no handler in this daemon").arg(parsed.verb);
             }
+            if (refusal.isEmpty()) {
+                clientSocket->write("ok\n");
+            } else {
+                LOG_WARN("Refused " << msg << ": " << refusal);
+                clientSocket->write(QStringLiteral("error: %1\n").arg(refusal).toUtf8());
+            }
+            clientSocket->flush();
             clientSocket->disconnectFromServer();
         });
         QObject::connect(clientSocket, &QLocalSocket::errorOccurred,

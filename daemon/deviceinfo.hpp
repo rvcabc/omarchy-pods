@@ -134,6 +134,18 @@ public:
     QString manufacturer() const { return m_manufacturer; }
     void setManufacturer(const QString &manufacturer) { m_manufacturer = manufacturer; }
 
+    // The rest of the opcode 0x1D metadata strings, published in status.json for the About section.
+    QString firmwareVersion() const { return m_firmwareVersion; }
+    void setFirmwareVersion(const QString &version) { m_firmwareVersion = version; }
+    QString serialNumber() const { return m_serialNumber; }
+    void setSerialNumber(const QString &serial) { m_serialNumber = serial; }
+    QString hardwareRevision() const { return m_hardwareRevision; }
+    void setHardwareRevision(const QString &revision) { m_hardwareRevision = revision; }
+    QString leftSerial() const { return m_leftSerial; }
+    void setLeftSerial(const QString &serial) { m_leftSerial = serial; }
+    QString rightSerial() const { return m_rightSerial; }
+    void setRightSerial(const QString &serial) { m_rightSerial = serial; }
+
     QString bluetoothAddress() const { return m_bluetoothAddress; }
     void setBluetoothAddress(const QString &address)
     {
@@ -183,6 +195,11 @@ public:
         // (e.g. AirPods Pro 3 A3064 in iter-73) resolve without
         // waiting for the AAP metadata packet to fire again.
         settings.setValue("modelNumber", modelNumber());
+        settings.setValue("firmwareVersion", firmwareVersion());
+        settings.setValue("serialNumber", serialNumber());
+        settings.setValue("hardwareRevision", hardwareRevision());
+        settings.setValue("leftSerial", leftSerial());
+        settings.setValue("rightSerial", rightSerial());
         settings.setValue("magicAccIRK", magicAccIRK());
         settings.setValue("magicAccEncKey", magicAccEncKey());
         settings.setValue("hearingAidEnabled", hearingAidEnabled());
@@ -210,6 +227,11 @@ public:
         } else {
             setModel(static_cast<AirPodsModel>(settings.value("DeviceInfo/model", (int)(AirPodsModel::Unknown)).toInt()));
         }
+        setFirmwareVersion(settings.value("DeviceInfo/firmwareVersion", "").toString());
+        setSerialNumber(settings.value("DeviceInfo/serialNumber", "").toString());
+        setHardwareRevision(settings.value("DeviceInfo/hardwareRevision", "").toString());
+        setLeftSerial(settings.value("DeviceInfo/leftSerial", "").toString());
+        setRightSerial(settings.value("DeviceInfo/rightSerial", "").toString());
         setMagicAccIRK(settings.value("DeviceInfo/magicAccIRK", QByteArray()).toByteArray());
         setMagicAccEncKey(settings.value("DeviceInfo/magicAccEncKey", QByteArray()).toByteArray());
         setHearingAidEnabled(settings.value("DeviceInfo/hearingAidEnabled", false).toBool());
@@ -258,6 +280,11 @@ private:
     AirPodsModel m_model = AirPodsModel::Unknown;
     QString m_modelNumber;
     QString m_manufacturer;
+    QString m_firmwareVersion;
+    QString m_serialNumber;
+    QString m_hardwareRevision;
+    QString m_leftSerial;
+    QString m_rightSerial;
     QString m_bluetoothAddress;
     EarDetection *m_earDetection;
 };
