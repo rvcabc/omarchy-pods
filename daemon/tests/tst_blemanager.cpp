@@ -89,10 +89,10 @@ static void powerAdapterOn(BleManager &manager)
                                     QBluetoothLocalDevice::HostConnectable));
 }
 
-// discoveryAgent and localDevice are the only other direct children, and neither is a QTimer.
+// The duty-cycle gap timer is a second QTimer child, so the retry timer is found by its object name.
 static QTimer *retryTimerOf(BleManager &manager)
 {
-    return manager.findChild<QTimer *>(QString(), Qt::FindDirectChildrenOnly);
+    return manager.findChild<QTimer *>(QStringLiteral("retryTimer"), Qt::FindDirectChildrenOnly);
 }
 
 class TestBleManager : public QObject

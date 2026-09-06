@@ -91,7 +91,6 @@ QString getConnectionStateName(BleInfo::ConnectionState state)
 BleManager::BleManager(QObject *parent) : QObject(parent)
 {
     discoveryAgent = new QBluetoothDeviceDiscoveryAgent(this);
-    discoveryAgent->setLowEnergyDiscoveryTimeout(0); // Continuous scanning
 
     connect(discoveryAgent, &QBluetoothDeviceDiscoveryAgent::deviceDiscovered,
             this, &BleManager::onDeviceDiscovered);
@@ -101,12 +100,20 @@ BleManager::BleManager(QObject *parent) : QObject(parent)
             this, &BleManager::onErrorOccurred);
 
     retryTimer = new QTimer(this);
+    retryTimer->setObjectName(QStringLiteral("retryTimer"));
     retryTimer->setSingleShot(true);
     connect(retryTimer, &QTimer::timeout, this, &BleManager::retryScan);
 
     localDevice = new QBluetoothLocalDevice(this);
     connect(localDevice, &QBluetoothLocalDevice::hostModeStateChanged,
             this, &BleManager::onHostModeChanged);
+    gapTimer = new QTimer(this);
+    gapTimer->setObjectName(QStringLiteral("gapTimer"));
+    gapTimer->setSingleShot(true);
+    connect(gapTimer, &QTimer::timeout, this, [this]() {
+        if (duty.gapFinished())
+            beginWindow();
+    });
 }
 
 BleManager::~BleManager()
@@ -118,13 +125,27 @@ BleManager::~BleManager()
     // redundant and ran before Qt's own child cleanup pass. Now empty.
 }
 
+void BleManager::beginWindow()
+{
+    discoveryAgent->setLowEnergyDiscoveryTimeout(ScanDuty::windowMs);
+    discoveryAgent->start(QBluetoothDeviceDiscoveryAgent::LowEnergyMethod);
+}
+
 void BleManager::startScan()
 {
     LOG_DEBUG("Starting BLE scan...");
     scanWanted = true;
+    const bool retryPending = retryTimer->isActive();
     retryTimer->stop();
     noteScanAlive();
-    discoveryAgent->start(QBluetoothDeviceDiscoveryAgent::LowEnergyMethod);
+    // Several callers ask for a scan that is already running, and restarting mid-gap would
+    // take back the radio this cycle just handed to whatever is trying to reconnect.
+    if (duty.active() && !retryPending)
+        return;
+    gapTimer->stop();
+    duty.stop();
+    duty.start();
+    beginWindow();
 }
 
 void BleManager::stopScan()
@@ -133,6 +154,8 @@ void BleManager::stopScan()
     scanWanted = false;
     retryTimer->stop();
     retryLadder.reset();
+    duty.stop();
+    gapTimer->stop();
     discoveryAgent->stop();
 }
 
@@ -151,7 +174,12 @@ void BleManager::retryScan()
     }
 
     LOG_DEBUG("Retrying BLE scan, attempt" << retryLadder.attempts());
-    discoveryAgent->start(QBluetoothDeviceDiscoveryAgent::LowEnergyMethod);
+    // The failed window was closed by onErrorOccurred; an error before the first window leaves the cycle idle.
+    if (!duty.active())
+        duty.start();
+    else if (!duty.gapFinished())
+        return;
+    beginWindow();
 }
 
 // The agent gets no signal when the adapter drops a live scan, and it still reports that scan as active.
@@ -166,6 +194,8 @@ void BleManager::onHostModeChanged(QBluetoothLocalDevice::HostMode mode)
     LOG_INFO("Bluetooth adapter powered on, restarting the BLE scan");
     // Call stop() first, because start() does nothing while the agent still reports an active scan.
     discoveryAgent->stop();
+    gapTimer->stop();
+    duty.stop();
     startScan();
 }
 
@@ -277,11 +307,12 @@ void BleManager::onDeviceDiscovered(const QBluetoothDeviceInfo &info)
     }
 }
 
+// Each window ends on the agent's own timeout, and the gap that follows is the point of the cycle.
 void BleManager::onScanFinished()
 {
-    if (discoveryAgent->isActive())
+    if (duty.windowFinished())
     {
-        discoveryAgent->start(QBluetoothDeviceDiscoveryAgent::LowEnergyMethod);
+        gapTimer->start(ScanDuty::gapMs);
     }
 }
 
@@ -308,5 +339,8 @@ void BleManager::onErrorOccurred(QBluetoothDeviceDiscoveryAgent::Error error)
     {
         LOG_DEBUG("BLE scan error repeated:" << error << ", retrying in" << delay << "ms");
     }
+    // A failed window ends the window, not the cycle; the retry ladder times the next one.
+    gapTimer->stop();
+    duty.windowFinished();
     retryTimer->start(delay);
 }

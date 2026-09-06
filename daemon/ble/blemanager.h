@@ -9,6 +9,7 @@
 #include <QDateTime>
 #include "blescanretry.hpp"
 #include "enums.h"
+#include "../scanduty.hpp"
 
 class QTimer;
 
@@ -88,6 +89,7 @@ signals:
 
 private:
     void noteScanAlive();
+    void beginWindow();
 
     // Default-init so a partial construction (or a refactor that
     // skips the explicit ctor body) doesn't leave a dangling pointer
@@ -100,6 +102,9 @@ private:
     // What the caller asked for, not what the radio does. A scan that waits for a retry stays wanted.
     bool scanWanted = false;
     QBluetoothDeviceDiscoveryAgent::Error lastScanError = QBluetoothDeviceDiscoveryAgent::NoError;
+    // Scanning half the time leaves the radio free for bonded LE devices to reconnect (scanduty.hpp).
+    QTimer *gapTimer = nullptr;
+    ScanDuty::Cycle duty;
 };
 
 #endif // BLEMANAGER_H
