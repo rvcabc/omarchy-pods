@@ -66,3 +66,20 @@ by name.
 This directory is GPL-3.0, inherited from upstream, and stays GPL-3.0. The bar
 widget in the repository root is a separate program that talks to this daemon
 over a state file and a command line, and is MIT. See the repository README.
+
+## Divergence, September 2026
+
+Upstream kavishdevar/librepods has had no commit to `linux/` since 2026-05-15 and its Rust rewrite (PR 241) has no
+socket, state file or D-Bus surface, so this daemon is the terminal branch for the fork at rvcabc/omarchy-pods. Pulled
+from thisisgm/omarchy-pods before diverging: PR #47 (PulseAudio context rebuild), PR #42 (BLE scan recovery) and
+PR #48 (BLE scan duty cycle, chosen over #39 for its tested header and over #50, a hard off switch, which can still be
+layered if a bonded LE device fails to reconnect). PR #40 (handoff) was reworked rather than merged: its CLAIM/RELEASE
+now fires on user-originated edges only, the daemon's own pause and resume carry their origin, `pause()` is additive,
+the sink is reclaimed only if the pods held it, and its watchdog rewrite, PlayPause fallback, per-activation
+`setDefaultSink`, `clearPausedServices` and Beats rows were dropped.
+
+Added here: a verb table with an answer for every verb, a generic control-command recorder (`control_ids_seen`), the
+full opcode 0x1D metadata, battery status 0x05, the opcode 0x4B level fix with a bounded restore, capability-aware
+cycling, sticky re-assert (CC 0x1A, 0x34), the settings table (`podsettings.hpp`) with its verbs, rename bounded in
+UTF-8 bytes, custom EQ (opcode 0x63), the battery banner, audio follow on connect, handoff (opcode 0x0E), and the
+hearing family on a raw L2CAP ATT client behind the Apple DeviceID gate.

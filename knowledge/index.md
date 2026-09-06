@@ -25,3 +25,8 @@ fact was not observable, the file says so in its own words instead of guessing.
 | [plugin-design-decisions](plugin-design-decisions.md) | what this panel owns against the stock audio and Bluetooth panels |
 | [airpods-pro-3-has-no-off-mode](airpods-pro-3-has-no-off-mode.md) | why the mode list comes from the daemon and not from a constant |
 | [nerd-font-glyph-coverage](nerd-font-glyph-coverage.md) | why the bar mark is drawn: fontconfig claims glyphs the font cannot draw |
+| [aap-control-command-echo](aap-control-command-echo.md) | how echoes become truthful status keys; the capture on this unit is still owed |
+| [deviceid-gate](deviceid-gate.md) | what the hearing controls need from BlueZ, how the daemon detects it, what it costs |
+| [att-over-raw-l2cap](att-over-raw-l2cap.md) | why Loud Sound Reduction is a POSIX socket and not a QBluetoothSocket |
+| [handoff-audio-source](handoff-audio-source.md) | the opcode 0x0E frame, CC 0x06, and the rules the daemon follows |
+| [wireplumber-default-stack](wireplumber-default-stack.md) | why the daemon sets the default sink once and never moves sink inputs |

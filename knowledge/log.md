@@ -61,3 +61,17 @@ than quietly rewritten.
 - Two claims that looked like defects and were not, both settled on the box: the
   daemon does remove `status.json` when systemd stops it, and a `FileView` does
   pick up a file created after the shell started.
+
+## 2026-09-06, the rvcabc fork
+
+The fork at rvcabc/omarchy-pods grew the daemon and the panel toward everything macOS offers an
+AirPods Pro 2; `FORK.md` and `daemon/UPSTREAM.md` record the divergence. New facts:
+
+- `deviceid-gate`: the hearing controls need the adapter to identify as Apple; measured against
+  `bluetoothctl show` on beast, which still reads the stock BlueZ DID.
+- `att-over-raw-l2cap`: Qt's D-Bus backend refuses connect-by-PSM, read out of qtconnectivity.
+- `handoff-audio-source`: the opcode 0x0E frame and the claim rules, from PR 40 and the Rust port.
+- `wireplumber-default-stack`: follow-default-target and restore-target on this box.
+- `aap-control-command-echo`: marked draft until the pods are connected with debug logging on.
+- `librepods-status-schema`: every new key listed; `schema_version` stays 1 because every key is
+  additive and the panel reads an absent key as absent.

@@ -50,6 +50,19 @@ does not use it, and runs `librepods-ctl` only for the control verbs below.
 | `supports_one_bud_anc` | bool | noise control and a second bud, so never on a Max |
 | `ear_detection_behavior` | int | 0 pause when one is out, 1 when both are out, 2 never |
 | `lid_state` | int | 0 open, 1 closed, 2 unknown |
+| `firmware_version`, `hardware_revision`, `serial_number`, `left_serial`, `right_serial` | string | the rest of the opcode 0x1D metadata; empty until a connect |
+| `optimized_charging` (inside `left`, `right`, `case`) | bool | battery status 0x05 |
+| `control_ids_seen` | array of "0x34" strings | control commands the pods echoed this session; evidence of an echo, not a list of settings |
+| `hearing_aid` | bool | CC 0x2C enabled byte as the daemon has always parsed it |
+| `hearing_aid_enrolled` | bool | CC 0x2C first data byte, only when echoed |
+| `allow_off`, `hold_cycle_modes`, `hold_left`, `hold_right`, `mic_mode`, `ear_detection_on_bud`, `volume_swipe`, `volume_swipe_speed`, `personalized_volume`, `tone_volume`, `press_speed`, `hold_duration`, `case_sounds`, `sleep_detection`, `connect_automatically`, `allow_auto_connect` | per row of podsettings.hpp | absent until echoed or asked for; from the echo when the id is in `control_ids_seen`, else from the persisted wish |
+| `custom_eq` | object {enabled, low, mid, high} | the last `eq:` request, persisted |
+| `setting_changes_total` | int | writes that went out through the settings table |
+| `notifications_enabled`, `notifications_connected`, `audio_follow_on_connect`, `handoff_connect_on_play` | bool | the daemon's own switches |
+| `audio_source` | object {type, other_device} | the last opcode 0x0E frame |
+| `handoff_claims_total`, `handoff_interruptions_total`, `handoff_interrupted` | int, int, bool | handoffstate.hpp counters |
+| `hearing_gate_ready` | bool | the adapter Modalias starts with bluetooth:v004C |
+| `hearing_assist`, `loud_sound_reduction`, `transparency_custom_hex` | bool, bool, string | hearing family; absent until set or read |
 
 The line arrives with **keys sorted alphabetically**, not in the daemon's insert
 order, because `QJsonObject` sorts. Anything reading the line positionally, or a

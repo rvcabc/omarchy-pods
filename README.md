@@ -1,7 +1,7 @@
 <h1 align="center">AirPods for Omarchy</h1>
 
 <p align="center">
-  Battery for each pod and the case, the listening modes, adaptive noise level, Conversation Awareness, One-Bud ANC and ear detection, drawn in Omarchy's own panel idiom.
+  Battery for each pod and the case, the listening modes, adaptive noise level, Conversation Awareness, One-Bud ANC and ear detection in the bar, and a settings window for everything else macOS offers: names, press-and-hold, microphone, volume, accessibility timings, case sounds, sleep detection, handoff with an iPhone and the hearing controls. This is the <a href="https://github.com/rvcabc/omarchy-pods">rvcabc fork</a> of thisisgm/omarchy-pods; see <a href="FORK.md">FORK.md</a>.
 </p>
 
 <p align="center">
@@ -39,17 +39,40 @@
   chosen from the model the daemon reports. AirPods Max carry no case, so their
   panel drops the case row and shows a single headphone battery.
 
-## Deliberately absent
+## Everything macOS offers, and where it lives here
 
-- **Volume and output device** live in the stock Audio panel, which already
-  switches PipeWire sinks. Press `Tab` in this panel to walk to it.
-- **Connect, disconnect and forget** live in the stock Bluetooth panel, and in
-  `omarchy bluetooth device`.
-- **Spatial Audio** has no renderer on Linux, so there is nothing to draw and
-  no row for it.
-- **Mic mode** is not an AirPods control. macOS applies Voice Isolation to the
-  input stream itself, for any microphone, and the AAP protocol carries no mic
-  packet. Input mute and input device live in the stock Audio panel.
+| macOS | Here |
+|---|---|
+| Listening modes, Adaptive level, Conversation Awareness, One-Bud ANC, ear detection, battery | the bar panel (unchanged) |
+| Name, Allow Off, press-and-hold cycle and per-bud action, microphone side, volume swipe and speed, Personalized Volume, tone volume, press speed, hold duration, charging case sounds, sleep detection, connect automatically | the settings window (`s` in the panel, the Settings row, or `omarchy-shell omapods settings`), each row a control command the pods echo back |
+| Battery banner when the case opens or the pods connect, clickable into the panel | the daemon, `notify:connected:on|off` |
+| Audio follows the pods when they connect | the daemon sets the default sink once per connection, `follow:on|off`; WirePlumber moves untargeted streams itself |
+| Automatic switching with an iPhone | the daemon claims the pods when you press play here, releases when you pause, pauses here when the phone takes them for media or a call, and resumes when it lets go (`handoff:connectonplay:on|off` for pulling them off the phone on play, off by default) |
+| Hearing Aid, Hearing Assistance, Loud Sound Reduction | the settings window, behind the DeviceID opt-in below |
+| Custom EQ (3 bands) | `librepods-ctl eq:on:50:50:50` |
+
+## Not available on Linux
+
+- **Spatial Audio** and Personalized Spatial Audio are rendered by Apple's host DSP; there is no Linux renderer.
+- **Head gestures**, **Siri**, **Announce Notifications**, **Live Translation** and **Camera Remote** need Apple services on the host.
+- **Find My**, **Audio Sharing** and **firmware updates** need an Apple account or an Apple device.
+- **Hearing Test** is an iPhone Health feature; an audiogram it produced can be enabled here (see Hearing).
+- **Studio-quality microphone** rides an AACP stream that only an unmerged upstream Rust branch decodes; the pods' microphone still means a headset profile, which this daemon never switches to on your behalf.
+- **Volume and output device** live in the stock Audio panel, **connect, disconnect and forget** in the stock Bluetooth panel, as before.
+
+## Hearing, an opt-in
+
+The pods accept Hearing Aid, Hearing Assistance and Loud Sound Reduction only from a host whose Bluetooth adapter identifies as Apple. Until it does, the three verbs and the settings rows answer with the one line to change:
+
+```
+DeviceID = bluetooth:004C:0000:0000
+```
+
+in `/etc/bluetooth/main.conf`, followed by `sudo systemctl restart bluetooth`. The daemon detects the change (`hearing_gate_ready` in the status file) and never edits the file itself. Know before you do it: the identity change applies to every Bluetooth peer of this box, upstream reports periodic disconnects while spoofed, a re-pair may be needed if the pods cached the old identity (the BLE battery keys self-heal on the next connect), and Hearing Aid enables nothing audible without an audiogram enrolled from an iPhone. Remove the line and restart bluetooth to revert.
+
+## Handoff with an iPhone
+
+Play here and the daemon claims the pods; pause and it releases them, so the phone can take them without a fight. When the phone starts media or takes a call, the pods say so and playback here pauses; when the phone stops, the daemon claims them back, restores them as the default output if they held it, and resumes only the players it paused. The daemon's own ear-detection pauses never release the pods to the phone. Counters and the last audio source are in the status file and the settings window.
 
 ## Screenshots
 
@@ -215,6 +238,7 @@ published status line the panel reads, and it goes too.
 | `b` | toggle One-Bud ANC |
 | `e` | cycle ear detection |
 | `r` | refresh |
+| `s` | open the settings window (also with the pods in the case) |
 | `tab` | move to the next panel |
 | `esc` | close |
 
@@ -232,6 +256,8 @@ opening anything.
 |---------|---------|-------|
 | Hide when disconnected | on | Leaves the bar entirely rather than sitting there with nothing to say. |
 | Path to librepods-ctl | empty | Leave empty to find it on `PATH`. |
+
+Everything else is set on the pods themselves through the settings window or `librepods-ctl <verb>`; `librepods-ctl` with no argument lists every verb. Each verb answers `ok` or `error: <reason>`, and a setting the pods have not echoed back this session is marked "not yet echoed" in the window, because the protocol has no negative acknowledgement and the pods ignore what they do not support.
 
 ## Tests
 
