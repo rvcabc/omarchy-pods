@@ -93,6 +93,9 @@ public:
 
         m_notifier->setEnabled(loadNotificationsEnabled());
         m_clock.start();
+        connect(m_notifier, &Notifier::failed, this, [](const QString &detail) {
+            LOG_WARN("Notification failed: " << detail);
+        });
         m_att = new AttClient(this);
         connect(m_att, &AttClient::closed, this, [this](const QString &reason) {
             LOG_WARN("ATT channel closed: " << reason);
@@ -171,7 +174,11 @@ public:
             }
         }
 
+        m_inConnectedSweep = true;
+
         monitor->checkAlreadyConnectedDevices();
+
+        m_inConnectedSweep = false;
         LOG_INFO("AirPodsTrayApp initialized");
 
         QBluetoothLocalDevice localDevice;
@@ -1016,7 +1023,11 @@ public slots:
                 });
             }
 
+            m_inConnectedSweep = true;
+
             monitor->checkAlreadyConnectedDevices();
+
+            m_inConnectedSweep = false;
             m_isSuspending = false;
         });
     }
@@ -1078,6 +1089,8 @@ private slots:
 
     void bluezDeviceConnected(const QString &address, const QString &name)
     {
+        // Only a connect BlueZ announced earns the banner; a sweep finding the pods already connected is a daemon start.
+        m_bannerEligible = !m_inConnectedSweep;
         rememberAirPodsDevice(address, name);
         m_disconnectFinalized = false;
 
@@ -1570,7 +1583,9 @@ private slots:
         }
         else if (data.startsWith(AirPodsPackets::Parse::FEATURES_ACK))
         {
-            m_connectedBannerPending = true;
+            // A control-link recovery on a link BlueZ never dropped is not a connect either, so eligibility is spent here.
+            m_connectedBannerPending = m_bannerEligible;
+            m_bannerEligible = false;
             // The audio-source frame names hosts by byte-reversed MAC, so this box's own is cached per link.
             m_localReversedMac = OpenPods::AudioSource::reversedMac(QBluetoothLocalDevice().address().toString());
             refreshHearingGate();
@@ -1683,6 +1698,11 @@ private slots:
         else if (data.startsWith(OpenPods::AudioSource::HEADER))
         {
             handleAudioSource(data);
+        }
+        else if (recorded.accepted)
+        {
+            // A control command with no branch of its own is exactly what the recorder is for.
+            LOG_DEBUG("Control command recorded: " << data.toHex());
         }
         else
         {
@@ -1882,6 +1902,7 @@ private slots:
         options.urgency = QStringLiteral("low");
         options.timeoutMs = connectedBannerTimeoutMs;
         options.execArgv = execArgv;
+        LOG_INFO("Battery banner: " << title << ", " << body);
         m_notifier->notify(Notifier::Channel::Connected, title, body, options);
     }
 
@@ -2120,6 +2141,8 @@ private:
     bool m_disconnectRequested = false;
     // Armed at FEATURES_ACK and spent on the first battery frame, which is when the banner has numbers to show.
     bool m_connectedBannerPending = false;
+    bool m_bannerEligible = false;
+    bool m_inConnectedSweep = false;
     static constexpr int connectedBannerTimeoutMs = 5000;
     // Handoff with the other devices that share the pods, driven by the audio-source frames and local playback edges.
     OpenPods::Handoff::State m_handoff;
@@ -2258,8 +2281,10 @@ public:
         status.insert("handoff_interrupted", m_handoff.interrupted());
         status.insert("handoff_connect_on_play", loadConnectOnPlay());
         status.insert("hearing_gate_ready", m_hearingGateReady);
-        if (const auto assist = currentSettingBytes(AirPodsPackets::HearingAssist::Type::ID)) {
-            status.insert("hearing_assist", static_cast<quint8>(assist->at(0)) == 0x01);
+        // This unit echoes 0x33 as 00, which is neither on nor off, so anything but 01 or 02 is published as null.
+        if (const auto assist = currentSettingBytes(AirPodsPackets::HearingAssist::Type::ID); assist && !assist->isEmpty()) {
+            const quint8 byte = static_cast<quint8>(assist->at(0));
+            status.insert("hearing_assist", byte == 0x01 ? QJsonValue(true) : byte == 0x02 ? QJsonValue(false) : QJsonValue());
         }
         // CC 0x2C carries enrolled then enabled; the bool key above keeps its old meaning, so enrolment is its own key.
         if (const auto hearingAid = m_controlCommands.payload(hearingAidControlId); hearingAid && !hearingAid->isEmpty()) {

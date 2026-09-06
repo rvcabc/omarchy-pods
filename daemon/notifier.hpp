@@ -123,7 +123,10 @@ public:
                     // omarchy-notification-send prints the id the server assigned when -p is given.
                     bool ok = false;
                     const quint32 id = process->readAllStandardOutput().trimmed().toUInt(&ok);
-                    if (exitCode == 0 && ok && id != noReplaceId) {
+                    if (exitCode != 0) {
+                        emit failed(QStringLiteral("omarchy notification send exited %1: %2")
+                                        .arg(exitCode).arg(QString::fromUtf8(process->readAllStandardError().trimmed())));
+                    } else if (ok && id != noReplaceId) {
                         m_replaceIds.insert(key, id);
                     }
                     process->deleteLater();
@@ -134,6 +137,7 @@ public:
 signals:
     void enabledChanged(bool enabled);
     void fallbackRequested(const QString &title, const QString &message);
+    void failed(const QString &detail);
 
 private:
     bool m_enabled = true;
