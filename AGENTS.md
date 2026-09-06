@@ -1,5 +1,8 @@
 # AGENTS.md
 
+This checkout is a fork; read [FORK.md](FORK.md) for the two rules it relaxes
+(attribution and scope) before applying the rest of this file.
+
 Read [CONTRIBUTING.md](CONTRIBUTING.md) first. It is the contract for everybody,
 and nothing here replaces it. This file adds the handful of things coding agents
 get wrong in this repo specifically.

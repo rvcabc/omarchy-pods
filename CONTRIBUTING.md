@@ -101,6 +101,8 @@ with the fact rather than with more code:
 - **No AI attribution anywhere**: no `Co-Authored-By` for a tool, no "Generated
   with" line, in commits, PR bodies or comments. Tools are welcome here, bylines
   for them are not.
+  In the rvcabc fork this rule is relaxed; see [FORK.md](FORK.md). Rewrite
+  commits before offering them upstream.
 - One concern per PR. The A2DP race and the control link recovery arrived as two
   PRs from the same author and that is exactly right.
 - The PR body should carry the reproduction, the fix in a sentence, and what you
