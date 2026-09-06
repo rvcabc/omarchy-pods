@@ -63,6 +63,89 @@ private slots:
         QVERIFY(parsed.reply.isEmpty());
     }
 
+    void settingVerbs_data()
+    {
+        QTest::addColumn<QString>("message");
+        QTest::addColumn<QString>("family");
+        QTest::addColumn<QString>("choice");
+        QTest::addColumn<int>("number");
+
+        QTest::newRow("allowoff:on") << QStringLiteral("allowoff:on") << QStringLiteral("allowoff") << QStringLiteral("on") << 0;
+        QTest::newRow("holdmodes:7") << QStringLiteral("holdmodes:7") << QStringLiteral("holdmodes") << QString() << 7;
+        QTest::newRow("holdmodes:15") << QStringLiteral("holdmodes:15") << QStringLiteral("holdmodes") << QString() << 15;
+        // The choice itself carries a colon, so the parser must split only on the family's own separator.
+        QTest::newRow("hold:left:noise")
+            << QStringLiteral("hold:left:noise") << QStringLiteral("hold") << QStringLiteral("left:noise") << 0;
+        QTest::newRow("hold:right:noise")
+            << QStringLiteral("hold:right:noise") << QStringLiteral("hold") << QStringLiteral("right:noise") << 1;
+        // The mic numbers are the wire bytes: this id is zero based, not the on/off convention.
+        QTest::newRow("mic:auto") << QStringLiteral("mic:auto") << QStringLiteral("mic") << QStringLiteral("auto") << 0;
+        QTest::newRow("mic:right") << QStringLiteral("mic:right") << QStringLiteral("mic") << QStringLiteral("right") << 1;
+        QTest::newRow("mic:left") << QStringLiteral("mic:left") << QStringLiteral("mic") << QStringLiteral("left") << 2;
+        QTest::newRow("eardetect:off")
+            << QStringLiteral("eardetect:off") << QStringLiteral("eardetect") << QStringLiteral("off") << 0;
+        QTest::newRow("swipe:on") << QStringLiteral("swipe:on") << QStringLiteral("swipe") << QStringLiteral("on") << 0;
+        QTest::newRow("swipespeed:longest")
+            << QStringLiteral("swipespeed:longest") << QStringLiteral("swipespeed") << QStringLiteral("longest") << 2;
+        QTest::newRow("pvol:on") << QStringLiteral("pvol:on") << QStringLiteral("pvol") << QStringLiteral("on") << 0;
+        QTest::newRow("tone:40") << QStringLiteral("tone:40") << QStringLiteral("tone") << QString() << 40;
+        QTest::newRow("pressspeed:slower")
+            << QStringLiteral("pressspeed:slower") << QStringLiteral("pressspeed") << QStringLiteral("slower") << 1;
+        QTest::newRow("holdduration:shortest")
+            << QStringLiteral("holdduration:shortest") << QStringLiteral("holdduration") << QStringLiteral("shortest") << 2;
+        QTest::newRow("casetone:off") << QStringLiteral("casetone:off") << QStringLiteral("casetone") << QStringLiteral("off") << 0;
+        QTest::newRow("sleep:on") << QStringLiteral("sleep:on") << QStringLiteral("sleep") << QStringLiteral("on") << 0;
+        QTest::newRow("autoconnect:on")
+            << QStringLiteral("autoconnect:on") << QStringLiteral("autoconnect") << QStringLiteral("on") << 0;
+        QTest::newRow("allowautoconnect:off")
+            << QStringLiteral("allowautoconnect:off") << QStringLiteral("allowautoconnect") << QStringLiteral("off") << 0;
+    }
+
+    void settingVerbs()
+    {
+        QFETCH(QString, message);
+        QFETCH(QString, family);
+        QFETCH(QString, choice);
+        QFETCH(int, number);
+
+        const Parsed parsed = parseVerb(message);
+        QVERIFY2(parsed.ok, parsed.reply.constData());
+        QCOMPARE(parsed.verb, family);
+        QCOMPARE(parsed.choice, choice);
+        QCOMPARE(parsed.number, number);
+        QVERIFY(parsed.text.isEmpty());
+        QVERIFY(parsed.reply.isEmpty());
+    }
+
+    void settingVerbs_badInput_data()
+    {
+        QTest::addColumn<QString>("message");
+        QTest::addColumn<QByteArray>("reply");
+
+        QTest::newRow("holdmodes:0") << QStringLiteral("holdmodes:0") << QByteArrayLiteral("error: holdmodes needs a value 1..15\n");
+        QTest::newRow("holdmodes:16") << QStringLiteral("holdmodes:16") << QByteArrayLiteral("error: holdmodes needs a value 1..15\n");
+        QTest::newRow("tone:101") << QStringLiteral("tone:101") << QByteArrayLiteral("error: tone needs a value 0..100\n");
+        // Siri is read back from the pods but never written, so the row does not list it.
+        QTest::newRow("hold:left:siri")
+            << QStringLiteral("hold:left:siri") << QByteArrayLiteral("error: hold needs one of left:noise|right:noise\n");
+        QTest::newRow("mic:both") << QStringLiteral("mic:both") << QByteArrayLiteral("error: mic needs one of auto|right|left\n");
+        QTest::newRow("swipespeed:fast")
+            << QStringLiteral("swipespeed:fast") << QByteArrayLiteral("error: swipespeed needs one of default|longer|longest\n");
+        QTest::newRow("allowautoconnect:maybe")
+            << QStringLiteral("allowautoconnect:maybe") << QByteArrayLiteral("error: allowautoconnect needs on or off\n");
+        QTest::newRow("eq:") << QStringLiteral("eq:") << QByteArrayLiteral("error: eq needs 1..32 bytes of text\n");
+    }
+
+    void settingVerbs_badInput()
+    {
+        QFETCH(QString, message);
+        QFETCH(QByteArray, reply);
+
+        const Parsed parsed = parseVerb(message);
+        QVERIFY(!parsed.ok);
+        QCOMPARE(parsed.reply, reply);
+    }
+
     void adaptiveFifty_parsesNumber()
     {
         const Parsed parsed = parseVerb(QStringLiteral("adaptive:50"));
@@ -128,29 +211,41 @@ private slots:
         QCOMPARE(parsed.reply, reply);
     }
 
-    // No table row is Kind::Text until rename lands, so this is the one test that builds its own row.
-    void textRow_countsUtf8Bytes()
+    // The rename row is Kind::Text, so the byte count, not the character count, decides.
+    void renameRow_countsUtf8Bytes()
     {
-        const VerbSpec rename{"rename", Kind::Text, nullptr, 1, 32, "Rename the pods"};
+        const Parsed named = parseVerb(QStringLiteral("rename:Bryce's Pods"));
+        QVERIFY2(named.ok, named.reply.constData());
+        QCOMPARE(named.verb, QStringLiteral("rename"));
+        QCOMPARE(named.text, QStringLiteral("Bryce's Pods"));
+        QVERIFY(named.choice.isEmpty());
 
-        const auto named = matchVerb(rename, QStringLiteral("rename:Bryce's Pods"));
-        QVERIFY(named.has_value());
-        QVERIFY2(named->ok, named->reply.constData());
-        QCOMPARE(named->verb, QStringLiteral("rename"));
-        QCOMPARE(named->text, QStringLiteral("Bryce's Pods"));
-
-        const auto empty = matchVerb(rename, QStringLiteral("rename:"));
-        QVERIFY(empty.has_value());
-        QVERIFY(!empty->ok);
-        QCOMPARE(empty->reply, QByteArrayLiteral("error: rename needs 1..32 bytes of text\n"));
+        const Parsed empty = parseVerb(QStringLiteral("rename:"));
+        QVERIFY(!empty.ok);
+        QCOMPARE(empty.reply, QByteArrayLiteral("error: rename needs 1..32 bytes of text\n"));
 
         // Seventeen two-byte characters is 34 bytes, so the byte limit trips where a character count would not.
         const int twoByteCharacters = 17;
         const QChar eAcute(0xE9);
-        const auto wide = matchVerb(rename, QStringLiteral("rename:") + QString(twoByteCharacters, eAcute));
-        QVERIFY(wide.has_value());
-        QVERIFY(!wide->ok);
-        QCOMPARE(wide->reply, QByteArrayLiteral("error: rename needs 1..32 bytes of text\n"));
+        const Parsed wide = parseVerb(QStringLiteral("rename:") + QString(twoByteCharacters, eAcute));
+        QVERIFY(!wide.ok);
+        QCOMPARE(wide.reply, QByteArrayLiteral("error: rename needs 1..32 bytes of text\n"));
+
+        // Sixteen of them is exactly 32 bytes and passes.
+        const Parsed widest = parseVerb(QStringLiteral("rename:") + QString(twoByteCharacters - 1, eAcute));
+        QVERIFY2(widest.ok, widest.reply.constData());
+        QCOMPARE(widest.text.toUtf8().size(), 32);
+    }
+
+    // The eq row only passes the text through; PodSettings::parseEq gives a bad band its own reason.
+    void eqRow_passesTextThrough()
+    {
+        const Parsed eq = parseVerb(QStringLiteral("eq:on:50:50:50"));
+        QVERIFY2(eq.ok, eq.reply.constData());
+        QCOMPARE(eq.verb, QStringLiteral("eq"));
+        QCOMPARE(eq.text, QStringLiteral("on:50:50:50"));
+        QVERIFY(eq.choice.isEmpty());
+        QCOMPARE(eq.number, 0);
     }
 
     void matchVerb_skipsRowsNotAddressed()
@@ -170,16 +265,33 @@ private slots:
     void usageLines_renderEveryRow()
     {
         const QStringList expected = {
-            QStringLiteral("  reopen              Reopen the daemon window (a headless daemon refuses)"),
-            QStringLiteral("  status              Print one-line JSON status snapshot to stdout"),
-            QStringLiteral("  forget              Run `bluetoothctl remove` on the connected device"),
-            QStringLiteral("  disconnect          bluetoothctl disconnect on the paired AirPods"),
-            QStringLiteral("  connect             bluetoothctl connect on the paired AirPods"),
-            QStringLiteral("  noise:MODE          Set noise control: off, anc, transparency, adaptive, or cycle (Off->ANC->Trans->Adaptive)"),
-            QStringLiteral("  ear:MODE            Ear-detection auto-pause: off, one (pause when either pod is removed, default), both (only when both are)"),
-            QStringLiteral("  ca:on|off           Conversation Awareness (Pro2 only)"),
-            QStringLiteral("  onebud:on|off       One-Bud ANC (Pro2+: keep ANC active with only one pod in)"),
-            QStringLiteral("  adaptive:N          Set Adaptive Noise level 0-100 (Pro2/Pro3, only while noise_mode=Adaptive)"),
+            QStringLiteral("  reopen                  Reopen the daemon window (a headless daemon refuses)"),
+            QStringLiteral("  status                  Print one-line JSON status snapshot to stdout"),
+            QStringLiteral("  forget                  Run `bluetoothctl remove` on the connected device"),
+            QStringLiteral("  disconnect              bluetoothctl disconnect on the paired AirPods"),
+            QStringLiteral("  connect                 bluetoothctl connect on the paired AirPods"),
+            QStringLiteral("  noise:MODE              Set noise control: off, anc, transparency, adaptive, or cycle (Off->ANC->Trans->Adaptive)"),
+            QStringLiteral("  ear:MODE                Ear-detection auto-pause: off, one (pause when either pod is removed, default), both (only when both are)"),
+            QStringLiteral("  ca:on|off               Conversation Awareness (Pro2 only)"),
+            QStringLiteral("  onebud:on|off           One-Bud ANC (Pro2+: keep ANC active with only one pod in)"),
+            QStringLiteral("  adaptive:N              Set Adaptive Noise level 0-100 (Pro2/Pro3, only while noise_mode=Adaptive)"),
+            QStringLiteral("  allowoff:on|off         Allow Off in the noise control cycle"),
+            QStringLiteral("  holdmodes:N             Modes the stem hold cycles, as a bitmask: 1 Off, 2 ANC, 4 Transparency, 8 Adaptive (at least two)"),
+            QStringLiteral("  hold:MODE               Stem hold per bud: left:noise or right:noise (the other bud keeps its setting)"),
+            QStringLiteral("  mic:MODE                Microphone: auto, right or left"),
+            QStringLiteral("  eardetect:on|off        Automatic ear detection on the buds"),
+            QStringLiteral("  swipe:on|off            Volume swipe on the stem"),
+            QStringLiteral("  swipespeed:MODE         Volume swipe length: default, longer or longest"),
+            QStringLiteral("  pvol:on|off             Personalized Volume"),
+            QStringLiteral("  tone:N                  Tone volume 0-100"),
+            QStringLiteral("  pressspeed:MODE         Press speed: default, slower or slowest"),
+            QStringLiteral("  holdduration:MODE       Press and hold duration: default, shorter or shortest"),
+            QStringLiteral("  casetone:on|off         Charging case sounds"),
+            QStringLiteral("  sleep:on|off            Sleep detection: pause audio when you fall asleep"),
+            QStringLiteral("  autoconnect:on|off      Connect to this computer automatically"),
+            QStringLiteral("  allowautoconnect:on|off Allow automatic connection"),
+            QStringLiteral("  rename:TEXT             Rename the AirPods (1 to 32 UTF-8 bytes)"),
+            QStringLiteral("  eq:TEXT                 Custom EQ: on|off:low:mid:high, each 0-100"),
         };
         const QStringList lines = usageLines();
         QCOMPARE(lines.size(), verbTable().size());

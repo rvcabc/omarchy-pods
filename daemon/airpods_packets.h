@@ -5,6 +5,7 @@
 #include <QByteArray>
 #include <optional>
 #include <climits>
+#include <initializer_list>
 
 #include "enums.h"
 #include "BasicControlCommand.hpp"
@@ -151,6 +152,9 @@ namespace AirPodsPackets
         static const QByteArray HANDSHAKE = QByteArray::fromHex("00000400010002000000000000000000");
         static const QByteArray SET_SPECIFIC_FEATURES = QByteArray::fromHex("040004004d00d700000000000000");
         static const QByteArray REQUEST_NOTIFICATIONS = QByteArray::fromHex("040004000f00ffffffffff");
+        // The fork sends five mask bytes where Android sends four; the ear-detection bit's place is proven on hardware by the eardetect:off check.
+        static const QByteArray notificationMaskDefault = QByteArray::fromHex("ffffffffff");
+        static const QByteArray REQUEST_NOTIFICATIONS_EAR_DETECTION_OFF = QByteArray::fromHex("040004000f00fffffdffff");
         static const QByteArray AIRPODS_DISCONNECTED = QByteArray::fromHex("00010000");
     }
 
@@ -177,14 +181,47 @@ namespace AirPodsPackets
 
     namespace Rename
     {
-        static QByteArray getPacket(const QString &newName)
+        // One byte carries the length, so an empty name or one over the 32 bytes the rename verb allows is refused here rather than truncated.
+        inline constexpr int renameMaxBytes = 32;
+
+        // Sample input: "Bryce's Pods" -> 04 00 04 00 1A 00 01 0C 00 42 72 79 63 65 27 73 20 50 6F 64 73; nullopt for 0 or more than 32 UTF-8 bytes.
+        inline std::optional<QByteArray> getPacket(const QString &newName)
         {
-            QByteArray nameBytes = newName.toUtf8();                   // Convert name to UTF-8
-            quint8 size = static_cast<char>(nameBytes.size());         // Name length (1 byte)
-            QByteArray packet = QByteArray::fromHex("040004001A0001"); // Header
-            packet.append(size);                                       // Append size byte
-            packet.append('\0');                                       // Append null byte
-            packet.append(nameBytes);                                  // Append name bytes
+            const QByteArray nameBytes = newName.toUtf8();
+            if (nameBytes.isEmpty() || nameBytes.size() > renameMaxBytes) {
+                return std::nullopt;
+            }
+            QByteArray packet = QByteArray::fromHex("040004001A0001");
+            packet.append(static_cast<char>(nameBytes.size()));
+            packet.append('\0');
+            packet.append(nameBytes);
+            return packet;
+        }
+    }
+
+    // Custom EQ is opcode 0x63, not a control command: 04 00 04 00 63 00 05 00 01 [state] [low] [mid] [high].
+    namespace CustomEq
+    {
+        inline const QByteArray HEADER = QByteArray::fromHex("040004006300050001");
+        // Unlike a control command, 0x02 here means enabled and 0x01 disabled.
+        inline constexpr quint8 enabledState = 0x02;
+        inline constexpr quint8 disabledState = 0x01;
+        inline constexpr int bandMin = 0;
+        inline constexpr int bandMax = 100;
+
+        // Sample input: enabled, 50, 50, 50 -> 04 00 04 00 63 00 05 00 01 02 32 32 32; a band outside 0..100 is nullopt.
+        inline std::optional<QByteArray> getPacket(bool enabled, int low, int mid, int high)
+        {
+            for (const int band : {low, mid, high}) {
+                if (band < bandMin || band > bandMax) {
+                    return std::nullopt;
+                }
+            }
+            QByteArray packet = HEADER;
+            packet.append(static_cast<char>(enabled ? enabledState : disabledState));
+            packet.append(static_cast<char>(low));
+            packet.append(static_cast<char>(mid));
+            packet.append(static_cast<char>(high));
             return packet;
         }
     }

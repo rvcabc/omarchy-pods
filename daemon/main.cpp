@@ -55,6 +55,7 @@
 #include "modecycle.hpp"
 #include "verbtable.hpp"
 #include "settingsreassert.hpp"
+#include "podsettings.hpp"
 
 using namespace AirpodsTrayApp::Enums;
 
@@ -586,34 +587,125 @@ public slots:
         return {};
     }
 
-    void renameAirPods(const QString &newName)
+    QString renameAirPods(const QString &newName)
     {
-        if (newName.isEmpty())
+        // The frame carries the length in one byte and the pods cap it at 32, counted in UTF-8 bytes, not characters.
+        const qsizetype bytes = newName.toUtf8().size();
+        const std::optional<QByteArray> packet = AirPodsPackets::Rename::getPacket(newName);
+        if (!packet)
         {
-            LOG_WARN("Cannot set empty name");
-            return;
-        }
-        if (newName.size() > 32)
-        {
-            LOG_WARN("Name is too long, must be 32 characters or less");
-            return;
+            return QStringLiteral("name is %1 bytes, limit is %2").arg(bytes).arg(AirPodsPackets::Rename::renameMaxBytes);
         }
         if (newName == m_deviceInfo->deviceName())
         {
             LOG_DEBUG("Name is already set to: " << newName);
-            return;
+            return {};
         }
+        if (!writePacketToSocket(*packet, "Rename packet written: "))
+        {
+            return QStringLiteral("AirPods control link is not connected");
+        }
+        LOG_INFO("Sent rename command for new name: " << newName);
+        m_deviceInfo->setDeviceName(newName);
+        return {};
+    }
 
-        QByteArray packet = AirPodsPackets::Rename::getPacket(newName);
-        if (writePacketToSocket(packet, "Rename packet written: "))
+    // The bytes a setting holds right now: what the pods echoed this session, else what the user last asked for.
+    std::optional<QByteArray> currentSettingBytes(quint8 id) const
+    {
+        if (const auto echoed = m_controlCommands.payload(id))
         {
-            LOG_INFO("Sent rename command for new name: " << newName);
-            m_deviceInfo->setDeviceName(newName);
+            return OpenPods::Reassert::wireData(*echoed);
         }
-        else
+        if (!m_settings)
         {
-            LOG_ERROR("Failed to send rename command: socket not open");
+            return std::nullopt;
         }
+        return OpenPods::Reassert::loadDesired(*m_settings, id);
+    }
+
+    // Every plain control-command setting goes through here; the table in podsettings.hpp is the spec.
+    QString setPodSetting(const OpenPods::PodSettings::Spec &spec, const OpenPods::Ipc::Parsed &parsed)
+    {
+        if (!m_deviceInfo || !m_settings)
+        {
+            return QStringLiteral("device info is not ready");
+        }
+        const OpenPods::PodSettings::Request request{parsed.choice, parsed.number};
+        const AirPodsModel model = m_deviceInfo->model();
+        if (const QString refusal = OpenPods::PodSettings::refusal(spec, request, supportsNoiseOff(model),
+                                                                   supportsAdaptiveAudio(model));
+            !refusal.isEmpty())
+        {
+            return refusal;
+        }
+        const std::optional<QByteArray> current = currentSettingBytes(spec.id);
+        const QByteArray data = spec.kind == OpenPods::PodSettings::Kind::Sides
+                                    ? OpenPods::PodSettings::encodeSides(request, current)
+                                    : OpenPods::PodSettings::encode(spec, request);
+        const std::optional<QByteArray> echoed = m_controlCommands.payload(spec.id);
+        if (echoed && OpenPods::Reassert::wireData(*echoed) == data)
+        {
+            LOG_DEBUG("Setting 0x" << QString::number(spec.id, 16) << " already holds " << data.toHex());
+            OpenPods::Reassert::saveDesired(*m_settings, spec.id, data);
+            restrictSettingsAccess();
+            return {};
+        }
+        const QByteArray frame = ControlCommand::createCommand(spec.id, static_cast<quint8>(data.at(0)),
+                                                               static_cast<quint8>(data.at(1)),
+                                                               static_cast<quint8>(data.at(2)),
+                                                               static_cast<quint8>(data.at(3)));
+        if (!writePacketToSocket(frame, "Setting packet written: "))
+        {
+            return QStringLiteral("AirPods control link is not connected");
+        }
+        // Persisted only once the packet went out, so a refused verb never shows up in status.json as if it applied.
+        OpenPods::Reassert::saveDesired(*m_settings, spec.id, data);
+        restrictSettingsAccess();
+        ++m_settingChangesTotal;
+        // Turning the on-bud ear detection off also changes the notification mask the pods expect.
+        if (spec.id == earDetectionConfigId)
+        {
+            writePacketToSocket(requestNotificationsPacket(), "Request notifications packet written: ");
+        }
+        return {};
+    }
+
+    // The mask follows the persisted on-bud ear detection wish, so a reconnect keeps the pods quiet about the ears.
+    QByteArray requestNotificationsPacket() const
+    {
+        const std::optional<QByteArray> earDetection = currentSettingBytes(earDetectionConfigId);
+        if (earDetection && !earDetection->isEmpty() && static_cast<quint8>(earDetection->at(0)) == controlCommandOff)
+        {
+            return AirPodsPackets::Connection::REQUEST_NOTIFICATIONS_EAR_DETECTION_OFF;
+        }
+        return AirPodsPackets::Connection::REQUEST_NOTIFICATIONS;
+    }
+
+    QString setCustomEq(const QString &text)
+    {
+        const std::optional<OpenPods::PodSettings::EqRequest> request = OpenPods::PodSettings::parseEq(text);
+        if (!request)
+        {
+            return QStringLiteral("eq needs on|off:low:mid:high, each 0-100");
+        }
+        const std::optional<QByteArray> packet =
+            AirPodsPackets::CustomEq::getPacket(request->enabled, request->low, request->mid, request->high);
+        if (!packet)
+        {
+            return QStringLiteral("eq bands must be 0-100");
+        }
+        if (!writePacketToSocket(*packet, "Custom EQ packet written: "))
+        {
+            return QStringLiteral("AirPods control link is not connected");
+        }
+        if (m_settings)
+        {
+            m_settings->setValue(QStringLiteral("CustomEq/request"), text);
+            restrictSettingsAccess();
+        }
+        ++m_settingChangesTotal;
+        return {};
     }
 
     void setEarDetectionBehavior(int behavior)
@@ -1339,11 +1431,11 @@ private slots:
         }
         else if (data.startsWith(AirPodsPackets::Parse::FEATURES_ACK))
         {
-            writePacketToSocket(AirPodsPackets::Connection::REQUEST_NOTIFICATIONS, "Request notifications packet written: ");
+            writePacketToSocket(requestNotificationsPacket(), "Request notifications packet written: ");
 
             QTimer::singleShot(2000, this, [this]() {
                 if (m_deviceInfo->batteryStatus().isEmpty()) {
-                    writePacketToSocket(AirPodsPackets::Connection::REQUEST_NOTIFICATIONS, "Request notifications packet written: ");
+                    writePacketToSocket(requestNotificationsPacket(), "Request notifications packet written: ");
                 }
             });
             QTimer::singleShot(OpenPods::Reassert::reassertAfterNotificationsMs, this, [this]() {
@@ -1748,6 +1840,10 @@ private:
 
     // Every control command the pods echoed this session, keyed by id.
     OpenPods::ControlCommandState m_controlCommands;
+    int m_settingChangesTotal = 0;
+    // CC 0x0A toggles ear detection on the buds themselves; the host-side pause policy is separate.
+    static constexpr quint8 earDetectionConfigId = 0x0A;
+    static constexpr quint8 controlCommandOff = 0x02;
 
     // Low-battery notification latches per battery source. State +
     // hysteresis live in LowBatteryLatch (see lowbatterywatcher.hpp);
@@ -1857,6 +1953,28 @@ public:
             idsSeen.append(QStringLiteral("0x%1").arg(id, 2, 16, QLatin1Char('0')).toUpper().replace(QStringLiteral("0X"), QStringLiteral("0x")));
         }
         status.insert("control_ids_seen", idsSeen);
+        status.insert("setting_changes_total", m_settingChangesTotal);
+        // Each setting reads from the echo when the pods sent one, else from the persisted wish; absent means neither.
+        for (const OpenPods::PodSettings::Spec &spec : OpenPods::PodSettings::table()) {
+            const std::optional<QByteArray> bytes = currentSettingBytes(spec.id);
+            if (!bytes) {
+                continue;
+            }
+            if (spec.kind == OpenPods::PodSettings::Kind::Sides) {
+                const QJsonObject sides = OpenPods::PodSettings::decodeSides(*bytes);
+                for (auto it = sides.begin(); it != sides.end(); ++it) {
+                    status.insert(it.key(), it.value());
+                }
+            } else {
+                status.insert(QString::fromLatin1(spec.statusKey), OpenPods::PodSettings::decode(spec, *bytes));
+            }
+        }
+        if (m_settings) {
+            const QString eqText = m_settings->value(QStringLiteral("CustomEq/request")).toString();
+            if (const auto eq = OpenPods::PodSettings::parseEq(eqText)) {
+                status.insert("custom_eq", OpenPods::PodSettings::eqJson(*eq));
+            }
+        }
         // 0 = PauseWhenOneRemoved, 1 = PauseWhenBothRemoved,
         // 2 = Disabled (matches MediaController::EarDetectionBehavior).
         status.insert("ear_detection_behavior", earDetectionBehavior());
@@ -2210,6 +2328,12 @@ int main(int argc, char *argv[]) {
                 refusal = trayAppPtr->setOneBudANCMode(parsed.choice == QLatin1String("on"));
             } else if (parsed.verb == QLatin1String("adaptive")) {
                 refusal = trayAppPtr->setAdaptiveNoiseLevel(parsed.number);
+            } else if (parsed.verb == QLatin1String("rename")) {
+                refusal = trayAppPtr->renameAirPods(parsed.text);
+            } else if (parsed.verb == QLatin1String("eq")) {
+                refusal = trayAppPtr->setCustomEq(parsed.text);
+            } else if (const auto spec = OpenPods::PodSettings::forVerb(parsed.verb)) {
+                refusal = trayAppPtr->setPodSetting(*spec, parsed);
             } else {
                 // The table and this adapter must list the same families, so a miss here is a build defect, not a user error.
                 LOG_ERROR("Verb has a table row but no handler: " << parsed.verb);

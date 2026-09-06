@@ -50,7 +50,16 @@ namespace OpenPods::Ipc
     inline constexpr QStringView boolChoices = u"on|off";
     inline constexpr int adaptiveLevelMin = 0;
     inline constexpr int adaptiveLevelMax = 100;
-    inline constexpr int usageVerbColumns = 20;
+    inline constexpr int usageVerbColumns = 24;
+    inline constexpr int holdCycleMaskMin = 1;
+    inline constexpr int holdCycleMaskMax = 15;
+    inline constexpr int toneVolumeMin = 0;
+    inline constexpr int toneVolumeMax = 100;
+    inline constexpr int textMinBytes = 1;
+    // The pods take at most 32 UTF-8 bytes of name, which AirPodsPackets::Rename::renameMaxBytes enforces again at the packet.
+    inline constexpr int renameMaxBytes = 32;
+    // Wider than the 14 bytes on:100:100:100 needs, so a bad band is refused by parseEq with its own reason rather than by the byte count.
+    inline constexpr int eqMaxBytes = 32;
 
     // Adding a row here is the whole change for a new verb; the parser reads only this table.
     inline const QList<VerbSpec> &verbTable()
@@ -70,6 +79,26 @@ namespace OpenPods::Ipc
             {"onebud", Kind::Bool, nullptr, 0, 0, "One-Bud ANC (Pro2+: keep ANC active with only one pod in)"},
             {"adaptive", Kind::Int, nullptr, adaptiveLevelMin, adaptiveLevelMax,
              "Set Adaptive Noise level 0-100 (Pro2/Pro3, only while noise_mode=Adaptive)"},
+            // Pod settings mirror OpenPods::PodSettings::table() row for row and description for description; tst_podsettings pins the two together.
+            {"allowoff", Kind::Bool, nullptr, 0, 0, "Allow Off in the noise control cycle"},
+            {"holdmodes", Kind::Int, nullptr, holdCycleMaskMin, holdCycleMaskMax,
+             "Modes the stem hold cycles, as a bitmask: 1 Off, 2 ANC, 4 Transparency, 8 Adaptive (at least two)"},
+            {"hold", Kind::Choice, "left:noise|right:noise", 0, 0,
+             "Stem hold per bud: left:noise or right:noise (the other bud keeps its setting)"},
+            {"mic", Kind::Choice, "auto|right|left", 0, 0, "Microphone: auto, right or left"},
+            {"eardetect", Kind::Bool, nullptr, 0, 0, "Automatic ear detection on the buds"},
+            {"swipe", Kind::Bool, nullptr, 0, 0, "Volume swipe on the stem"},
+            {"swipespeed", Kind::Choice, "default|longer|longest", 0, 0, "Volume swipe length: default, longer or longest"},
+            {"pvol", Kind::Bool, nullptr, 0, 0, "Personalized Volume"},
+            {"tone", Kind::Int, nullptr, toneVolumeMin, toneVolumeMax, "Tone volume 0-100"},
+            {"pressspeed", Kind::Choice, "default|slower|slowest", 0, 0, "Press speed: default, slower or slowest"},
+            {"holdduration", Kind::Choice, "default|shorter|shortest", 0, 0, "Press and hold duration: default, shorter or shortest"},
+            {"casetone", Kind::Bool, nullptr, 0, 0, "Charging case sounds"},
+            {"sleep", Kind::Bool, nullptr, 0, 0, "Sleep detection: pause audio when you fall asleep"},
+            {"autoconnect", Kind::Bool, nullptr, 0, 0, "Connect to this computer automatically"},
+            {"allowautoconnect", Kind::Bool, nullptr, 0, 0, "Allow automatic connection"},
+            {"rename", Kind::Text, nullptr, textMinBytes, renameMaxBytes, "Rename the AirPods (1 to 32 UTF-8 bytes)"},
+            {"eq", Kind::Text, nullptr, textMinBytes, eqMaxBytes, "Custom EQ: on|off:low:mid:high, each 0-100"},
         };
         return table;
     }
@@ -173,7 +202,7 @@ namespace OpenPods::Ipc
         return family;
     }
 
-    // One line per row in the librepods-ctl usage shape: two spaces, the verb padded to 20 columns, the description.
+    // One line per row in the librepods-ctl usage shape: two spaces, the verb padded to 24 columns, the description.
     inline QStringList usageLines()
     {
         QStringList lines;

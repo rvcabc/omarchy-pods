@@ -189,3 +189,8 @@ openpods_add_test(tst_verbtable
     tst_verbtable.cpp
     ../verbtable.hpp
 )
+
+openpods_add_test(tst_podsettings
+    tst_podsettings.cpp
+    ../podsettings.hpp
+)
