@@ -24,6 +24,11 @@ MediaController::MediaController(QObject *parent) : QObject(parent) {
   {
     LOG_ERROR("Failed to initialize PulseAudio controller");
   }
+  m_conversationRestoreTimer = new QTimer(this);
+  m_conversationRestoreTimer->setSingleShot(true);
+  connect(m_conversationRestoreTimer, &QTimer::timeout, this, [this]() {
+    applyConversationDecision(m_conversation.onTimeout());
+  });
 }
 
 void MediaController::handleEarDetection(EarDetection *earDetection)
@@ -148,56 +153,55 @@ bool MediaController::isActiveOutputDeviceAirPods() {
   return defaultSink.contains(connectedDeviceMacAddress);
 }
 
+// Sample: 04 00 04 00 4B 00 02 00 01 01 (level 1, the wearer started speaking)
 void MediaController::handleConversationalAwareness(const QByteArray &data) {
-    if (data.size() < 10) {
-        LOG_ERROR("Invalid conversational awareness packet");
+    const std::optional<quint8> level = OpenPods::Conversation::levelFromFrame(data);
+    if (!level) {
+        LOG_ERROR("Invalid conversational awareness packet: " << data.toHex());
         return;
     }
+    applyConversationDecision(m_conversation.onLevel(*level));
+}
 
-    uint8_t flag = (uint8_t)data[9];
-
-    switch (flag) {
-    case 0x01:
-        LOG_INFO("Conversational awareness event: voice detected");
-
-        if (initialVolume == -1 && isActiveOutputDeviceAirPods()) {
-            QString sink = m_pulseAudio->getDefaultSink();
-            initialVolume = m_pulseAudio->getSinkVolume(sink);
-            LOG_DEBUG("Initial volume saved: " << initialVolume << "%");
-        }
-
-        if (initialVolume != -1) {
-            QString sink = m_pulseAudio->getDefaultSink();
-            // Snap CA-duck target to nearest 5% so the volume label
-            // matches the Quickshell keyboard-shortcut grid. Without
-            // this `initialVolume * 0.20` produces off-grid values like
-            // 7, 14, 19 etc. depending on user's starting volume.
-            int target = snapToGrid(static_cast<int>(initialVolume * 0.20));
-            m_pulseAudio->setSinkVolume(sink, target);
-            LOG_INFO("Volume lowered to " << target << "%");
-        }
-        break;
-
-    case 0x08:
-        LOG_INFO("Conversational awareness disabled");
-        initialVolume = -1;
-        break;
-
-    case 0x09:
-        LOG_INFO("Conversational awareness enabled");
-        break;
-
-    default:
-        LOG_INFO("Conversational awareness event: voice ended");
-
-        if (initialVolume != -1 && isActiveOutputDeviceAirPods()) {
-            QString sink = m_pulseAudio->getDefaultSink();
-            m_pulseAudio->setSinkVolume(sink, initialVolume);
-            LOG_INFO("Volume restored to " << initialVolume << "%");
-            initialVolume = -1;
-        }
-        break;
+void MediaController::applyConversationDecision(const OpenPods::Conversation::LevelTracker::Decision &decision) {
+    using OpenPods::Conversation::Action;
+    LOG_INFO(decision.logLine);
+    if (decision.action == Action::Duck) {
+        duckForConversation();
+    } else if (decision.action == Action::Restore) {
+        restoreAfterConversation();
     }
+    if (decision.cancelTimeout) {
+        m_conversationRestoreTimer->stop();
+    }
+    if (decision.armTimeout) {
+        m_conversationRestoreTimer->start(OpenPods::Conversation::caRestoreTimeoutMs);
+    }
+}
+
+void MediaController::duckForConversation() {
+    if (initialVolume == -1 && isActiveOutputDeviceAirPods()) {
+        QString sink = m_pulseAudio->getDefaultSink();
+        initialVolume = m_pulseAudio->getSinkVolume(sink);
+        LOG_DEBUG("Initial volume saved: " << initialVolume << "%");
+    }
+    if (initialVolume != -1) {
+        QString sink = m_pulseAudio->getDefaultSink();
+        // Snapped to the 5% grid the Quickshell volume keys use, so the label never lands on 7 or 14.
+        int target = snapToGrid(static_cast<int>(initialVolume * 0.20));
+        m_pulseAudio->setSinkVolume(sink, target);
+        LOG_INFO("Volume lowered to " << target << "%");
+    }
+}
+
+void MediaController::restoreAfterConversation() {
+    if (initialVolume != -1 && isActiveOutputDeviceAirPods()) {
+        QString sink = m_pulseAudio->getDefaultSink();
+        m_pulseAudio->setSinkVolume(sink, initialVolume);
+        LOG_INFO("Volume restored to " << initialVolume << "%");
+    }
+    // The saved level is dropped either way, or a later duck would ratchet down from a stale value.
+    initialVolume = -1;
 }
 
 
