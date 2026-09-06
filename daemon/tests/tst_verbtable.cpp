@@ -294,6 +294,9 @@ private slots:
             QStringLiteral("  notify:MODE             Desktop toasts: on|off for all of them, connected:on|off for the battery banner on connect"),
             QStringLiteral("  follow:on|off           Make the AirPods the default output when they connect"),
             QStringLiteral("  handoff:MODE            Handoff: connectonplay:on|off pulls the pods off another device when playback starts here"),
+            QStringLiteral("  hearingaid:on|off       Hearing Aid (needs an enrolled audiogram and the Apple DeviceID)"),
+            QStringLiteral("  hearingassist:on|off    Hearing Assistance (needs the Apple DeviceID)"),
+            QStringLiteral("  lsr:on|off              Loud Sound Reduction over ATT (needs the Apple DeviceID)"),
             QStringLiteral("  eq:TEXT                 Custom EQ: on|off:low:mid:high, each 0-100"),
         };
         const QStringList lines = usageLines();

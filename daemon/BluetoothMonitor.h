@@ -19,6 +19,8 @@ public:
     void probeDeviceConnected(const QString &macAddress, quint64 requestId);
     // The paired device that advertises the AAP service, for a connect or disconnect before any link has told us the address.
     QString findPairedAirPodsAddress();
+    // The adapter's DID as BlueZ advertises it ("bluetooth:v004Cp0000d0000" once DeviceID is set), empty when unknown.
+    QString adapterModalias();
 
 signals:
     void deviceConnected(const QString &macAddress, const QString &deviceName);

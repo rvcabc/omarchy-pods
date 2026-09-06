@@ -58,6 +58,7 @@
 #include "podsettings.hpp"
 #include "audiosource.hpp"
 #include "handoffstate.hpp"
+#include "attclient.h"
 #include <QElapsedTimer>
 
 using namespace AirpodsTrayApp::Enums;
@@ -92,6 +93,11 @@ public:
 
         m_notifier->setEnabled(loadNotificationsEnabled());
         m_clock.start();
+        m_att = new AttClient(this);
+        connect(m_att, &AttClient::closed, this, [this](const QString &reason) {
+            LOG_WARN("ATT channel closed: " << reason);
+            emit airPodsStatusChanged();
+        });
         connect(m_notifier, &Notifier::enabledChanged, this, &AirPodsTrayApp::saveNotificationsEnabled);
         connect(m_notifier, &Notifier::enabledChanged, this, &AirPodsTrayApp::notificationsEnabledChanged);
         connect(m_deviceInfo, &DeviceInfo::batteryStatusChanged, this, &AirPodsTrayApp::checkLowBatteryThresholds);
@@ -125,6 +131,7 @@ public:
         mediaController->followMediaChanges();
 
         monitor = new BluetoothMonitor(this);
+        refreshHearingGate();
         connect(monitor, &BluetoothMonitor::deviceConnected, this, &AirPodsTrayApp::bluezDeviceConnected);
         connect(monitor, &BluetoothMonitor::deviceDisconnected, this, &AirPodsTrayApp::bluezDeviceDisconnected);
         connect(monitor, &BluetoothMonitor::deviceConnectionProbeFinished,
@@ -813,14 +820,109 @@ public slots:
         emit phoneMacStatusChanged();
     }
 
-    void setHearingAidEnabled(bool enabled)
+    // The pods ignore every hearing packet from a host whose DID is not Apple's, so the gate is checked here, not on the wire.
+    QString hearingRefusal() const
     {
+        if (!m_hearingGateReady) {
+            return QStringLiteral("hearing features need DeviceID = bluetooth:004C:0000:0000 in /etc/bluetooth/main.conf (then sudo systemctl restart bluetooth)");
+        }
+        if (!areAirpodsConnected()) {
+            return QStringLiteral("AirPods control link is not connected");
+        }
+        return {};
+    }
+
+    void refreshHearingGate()
+    {
+        const QString modalias = monitor ? monitor->adapterModalias() : QString();
+        const bool ready = modalias.startsWith(QLatin1String("bluetooth:v004C"), Qt::CaseInsensitive);
+        if (ready != m_hearingGateReady) {
+            LOG_INFO("Hearing gate " << (ready ? "ready" : "closed") << ", adapter Modalias " << modalias);
+        }
+        m_hearingGateReady = ready;
+    }
+
+    QString setHearingAidEnabled(bool enabled)
+    {
+        if (const QString refusal = hearingRefusal(); !refusal.isEmpty()) {
+            return refusal;
+        }
         LOG_INFO("Setting hearing aid to: " << (enabled ? "enabled" : "disabled"));
         QByteArray packet = enabled ? AirPodsPackets::HearingAid::ENABLED
                                     : AirPodsPackets::HearingAid::DISABLED;
 
-        writePacketToSocket(packet, "Hearing aid packet written: ");
+        if (!writePacketToSocket(packet, "Hearing aid packet written: ")) {
+            return QStringLiteral("AirPods control link is not connected");
+        }
         m_deviceInfo->setHearingAidEnabled(enabled);
+        return {};
+    }
+
+    QString setHearingAssist(bool enabled)
+    {
+        if (const QString refusal = hearingRefusal(); !refusal.isEmpty()) {
+            return refusal;
+        }
+        const QByteArray packet = enabled ? AirPodsPackets::HearingAssist::ENABLED : AirPodsPackets::HearingAssist::DISABLED;
+        if (!writePacketToSocket(packet, "Hearing assist packet written: ")) {
+            return QStringLiteral("AirPods control link is not connected");
+        }
+        OpenPods::Reassert::saveDesired(*m_settings, AirPodsPackets::HearingAssist::Type::ID,
+                                        QByteArray(1, static_cast<char>(enabled ? 0x01 : 0x02)));
+        restrictSettingsAccess();
+        ++m_settingChangesTotal;
+        return {};
+    }
+
+    // Opens the ATT channel on first use; the answer to the verb is immediate, the read-back lands in status.json.
+    QString ensureAttOpen()
+    {
+        if (m_att->isOpen() || m_att->isConnecting()) {
+            return {};
+        }
+        QString reason;
+        if (!m_att->open(m_deviceInfo->bluetoothAddress(), &reason)) {
+            return QStringLiteral("ATT channel could not open: %1").arg(reason);
+        }
+        // The transparency blob is read once per channel so the panel can show what the pods hold.
+        m_att->read(OpenPods::Att::transparencyHandle, [this](bool ok, const QString &detail, const QByteArray &value) {
+            if (ok) {
+                m_transparencyCustom = value;
+                emit airPodsStatusChanged();
+            } else {
+                LOG_WARN("Transparency read failed: " << detail);
+            }
+        });
+        return {};
+    }
+
+    QString setLoudSoundReduction(bool enabled)
+    {
+        if (const QString refusal = hearingRefusal(); !refusal.isEmpty()) {
+            return refusal;
+        }
+        if (const QString refusal = ensureAttOpen(); !refusal.isEmpty()) {
+            return refusal;
+        }
+        const QByteArray value(1, static_cast<char>(enabled ? OpenPods::Att::loudSoundReductionOn : OpenPods::Att::loudSoundReductionOff));
+        m_att->write(OpenPods::Att::loudSoundReductionHandle, value, [this](bool ok, const QString &detail, const QByteArray &) {
+            if (!ok) {
+                LOG_ERROR("Loud Sound Reduction write refused: " << detail);
+                return;
+            }
+            // The CCCD on this handle does not work, so the state is read back rather than notified.
+            m_att->read(OpenPods::Att::loudSoundReductionHandle, [this](bool readOk, const QString &readDetail, const QByteArray &readValue) {
+                if (!readOk || readValue.isEmpty()) {
+                    LOG_ERROR("Loud Sound Reduction read failed: " << readDetail);
+                    return;
+                }
+                m_loudSoundReduction = static_cast<quint8>(readValue.at(0)) == OpenPods::Att::loudSoundReductionOn;
+                LOG_INFO("Loud Sound Reduction is " << (*m_loudSoundReduction ? "on" : "off"));
+                emit airPodsStatusChanged();
+            });
+        });
+        ++m_settingChangesTotal;
+        return {};
     }
 
     bool writePacketToSocket(const QByteArray &packet, const QString &logMessage)
@@ -1087,6 +1189,9 @@ private slots:
         m_disconnectRequested = false;
         m_connectedBannerPending = false;
         mediaController->startFollowSession();
+        m_att->close();
+        m_loudSoundReduction.reset();
+        m_transparencyCustom.clear();
         if (trayManager) {
             trayManager->resetTrayIcon();
         }
@@ -1468,6 +1573,7 @@ private slots:
             m_connectedBannerPending = true;
             // The audio-source frame names hosts by byte-reversed MAC, so this box's own is cached per link.
             m_localReversedMac = OpenPods::AudioSource::reversedMac(QBluetoothLocalDevice().address().toString());
+            refreshHearingGate();
             writePacketToSocket(requestNotificationsPacket(), "Request notifications packet written: ");
             // Pods coming out of the case while something plays here should land on this box, so claim them now.
             if (mediaController->getCurrentMediaState() == MediaController::MediaState::Playing)
@@ -2021,8 +2127,14 @@ private:
     QByteArray m_localReversedMac;
     std::optional<OpenPods::AudioSource::Info> m_lastAudioSource;
     bool m_lastAudioSourceOther = false;
+    // Hearing lives behind the Apple DeviceID gate and, for Loud Sound Reduction, on the ATT channel.
+    AttClient *m_att = nullptr;
+    bool m_hearingGateReady = false;
+    std::optional<bool> m_loudSoundReduction;
+    QByteArray m_transparencyCustom;
     // CC 0x0A toggles ear detection on the buds themselves; the host-side pause policy is separate.
     static constexpr quint8 earDetectionConfigId = 0x0A;
+    static constexpr quint8 hearingAidControlId = 0x2C;
     static constexpr quint8 controlCommandOff = 0x02;
 
     // Low-battery notification latches per battery source. State +
@@ -2145,6 +2257,20 @@ public:
         status.insert("handoff_interruptions_total", m_handoff.interruptionsTotal());
         status.insert("handoff_interrupted", m_handoff.interrupted());
         status.insert("handoff_connect_on_play", loadConnectOnPlay());
+        status.insert("hearing_gate_ready", m_hearingGateReady);
+        if (const auto assist = currentSettingBytes(AirPodsPackets::HearingAssist::Type::ID)) {
+            status.insert("hearing_assist", static_cast<quint8>(assist->at(0)) == 0x01);
+        }
+        // CC 0x2C carries enrolled then enabled; the bool key above keeps its old meaning, so enrolment is its own key.
+        if (const auto hearingAid = m_controlCommands.payload(hearingAidControlId); hearingAid && !hearingAid->isEmpty()) {
+            status.insert("hearing_aid_enrolled", static_cast<quint8>(hearingAid->at(0)) == 0x01);
+        }
+        if (m_loudSoundReduction) {
+            status.insert("loud_sound_reduction", *m_loudSoundReduction);
+        }
+        if (!m_transparencyCustom.isEmpty()) {
+            status.insert("transparency_custom_hex", QString::fromLatin1(m_transparencyCustom.toHex()));
+        }
         // Each setting reads from the echo when the pods sent one, else from the persisted wish; absent means neither.
         for (const OpenPods::PodSettings::Spec &spec : OpenPods::PodSettings::table()) {
             const std::optional<QByteArray> bytes = currentSettingBytes(spec.id);
@@ -2534,6 +2660,12 @@ int main(int argc, char *argv[]) {
                 trayAppPtr->saveFollowOnConnect(parsed.choice == QLatin1String("on"));
             } else if (parsed.verb == QLatin1String("handoff")) {
                 trayAppPtr->saveConnectOnPlay(parsed.choice.endsWith(QLatin1String(":on")));
+            } else if (parsed.verb == QLatin1String("hearingaid")) {
+                refusal = trayAppPtr->setHearingAidEnabled(parsed.choice == QLatin1String("on"));
+            } else if (parsed.verb == QLatin1String("hearingassist")) {
+                refusal = trayAppPtr->setHearingAssist(parsed.choice == QLatin1String("on"));
+            } else if (parsed.verb == QLatin1String("lsr")) {
+                refusal = trayAppPtr->setLoudSoundReduction(parsed.choice == QLatin1String("on"));
             } else if (const auto spec = OpenPods::PodSettings::forVerb(parsed.verb)) {
                 refusal = trayAppPtr->setPodSetting(*spec, parsed);
             } else {

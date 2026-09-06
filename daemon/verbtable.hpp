@@ -103,6 +103,10 @@ namespace OpenPods::Ipc
             {"follow", Kind::Bool, nullptr, 0, 0, "Make the AirPods the default output when they connect"},
             {"handoff", Kind::Choice, "connectonplay:on|connectonplay:off", 0, 0,
              "Handoff: connectonplay:on|off pulls the pods off another device when playback starts here"},
+            // The hearing family needs the adapter to identify as Apple (DeviceID in /etc/bluetooth/main.conf).
+            {"hearingaid", Kind::Bool, nullptr, 0, 0, "Hearing Aid (needs an enrolled audiogram and the Apple DeviceID)"},
+            {"hearingassist", Kind::Bool, nullptr, 0, 0, "Hearing Assistance (needs the Apple DeviceID)"},
+            {"lsr", Kind::Bool, nullptr, 0, 0, "Loud Sound Reduction over ATT (needs the Apple DeviceID)"},
             {"eq", Kind::Text, nullptr, textMinBytes, eqMaxBytes, "Custom EQ: on|off:low:mid:high, each 0-100"},
         };
         return table;

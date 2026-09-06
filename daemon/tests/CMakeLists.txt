@@ -205,3 +205,8 @@ openpods_add_test(tst_handoffstate
     ../handoffstate.hpp
     ../audiosource.hpp
 )
+
+openpods_add_test(tst_attpdu
+    tst_attpdu.cpp
+    ../attpdu.hpp
+)

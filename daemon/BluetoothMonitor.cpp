@@ -297,3 +297,26 @@ QString BluetoothMonitor::findPairedAirPodsAddress()
     }
     return QString();
 }
+
+QString BluetoothMonitor::adapterModalias()
+{
+    if (!m_dbus.isConnected()) return QString();
+
+    QDBusMessage request = QDBusMessage::createMethodCall(
+        "org.bluez", "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects");
+    QDBusMessage reply = m_dbus.call(request, QDBus::Block, sweepTimeoutMs);
+    if (reply.type() == QDBusMessage::ErrorMessage || reply.arguments().isEmpty()) return QString();
+
+    QVariant firstArg = reply.arguments().constFirst();
+    QDBusArgument arg = firstArg.value<QDBusArgument>();
+    ManagedObjectList managedObjects;
+    arg >> managedObjects;
+
+    for (auto it = managedObjects.constBegin(); it != managedObjects.constEnd(); ++it)
+    {
+        const QMap<QString, QVariantMap> &interfaces = it.value();
+        if (!interfaces.contains("org.bluez.Adapter1")) continue;
+        return interfaces.value("org.bluez.Adapter1").value("Modalias").toString();
+    }
+    return QString();
+}
