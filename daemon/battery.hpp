@@ -57,6 +57,8 @@ public:
         Charging = 0x01,
         Discharging = 0x02,
         Disconnected = 0x04,
+        // Newer firmware sends this instead of Charging once the case is holding at 80 percent.
+        OptimizedCharging = 0x05,
     };
     Q_ENUM(BatteryStatus)
 
@@ -67,7 +69,7 @@ public:
         BatteryStatus status = BatteryStatus::Disconnected;
     };
 
-    // Parse the battery status packet and detect primary/secondary pods
+    // Sample input: 04 00 04 00 04 00 03 02 01 64 01 01 04 01 64 02 01 08 01 50 05 01, count then [component 01 level status 01] per record.
     bool parsePacket(const QByteArray &packet)
     {
         // BATTERY_STATUS header is 6 bytes; startsWith alone doesn't
@@ -187,30 +189,30 @@ public:
             // formatBattery masks to 0-127, so this also drops the 0x7F that means unknown.
             if (headsetLevel <= 100) {
                 states[Component::Headset] = {static_cast<quint8>(headsetLevel),
-                    headsetCharging ? BatteryStatus::Charging : BatteryStatus::Discharging};
+                    chargingStatus(Component::Headset, headsetCharging)};
             }
         } else {
             if (rawLeftBattery == CHAR_MAX) {
                 rawLeftBattery = states.value(Component::Left).level; // Use last valid level
-                isLeftCharging = states.value(Component::Left).status == BatteryStatus::Charging;
+                isLeftCharging = isCharging(Component::Left);
             }
 
             if (rawRightBattery == CHAR_MAX) {
                 rawRightBattery = states.value(Component::Right).level; // Use last valid level
-                isRightCharging = states.value(Component::Right).status == BatteryStatus::Charging;
+                isRightCharging = isCharging(Component::Right);
             }
 
             if (rawCaseBattery == CHAR_MAX) {
                 rawCaseBattery = states.value(Component::Case).level; // Use last valid level
-                isCaseCharging = states.value(Component::Case).status == BatteryStatus::Charging;
+                isCaseCharging = isCharging(Component::Case);
             }
 
             // Update states
-            states[Component::Left] = {static_cast<quint8>(rawLeftBattery), isLeftCharging ? BatteryStatus::Charging : BatteryStatus::Discharging};
-            states[Component::Right] = {static_cast<quint8>(rawRightBattery), isRightCharging ? BatteryStatus::Charging : BatteryStatus::Discharging};
+            states[Component::Left] = {static_cast<quint8>(rawLeftBattery), chargingStatus(Component::Left, isLeftCharging)};
+            states[Component::Right] = {static_cast<quint8>(rawRightBattery), chargingStatus(Component::Right, isRightCharging)};
             // Only a docked pod can read the case, so the payload's 0 there means unknown and writing it would publish a flat case and trip the low-battery latch.
             if ((rawCaseBattery > 0 || podInCase) && rawCaseBattery <= 100) {
-                states[Component::Case] = {static_cast<quint8>(rawCaseBattery), isCaseCharging ? BatteryStatus::Charging : BatteryStatus::Discharging};
+                states[Component::Case] = {static_cast<quint8>(rawCaseBattery), chargingStatus(Component::Case, isCaseCharging)};
             }
             primaryPod = isLeftPodPrimary ? Component::Left : Component::Right;
             secondaryPod = isLeftPodPrimary ? Component::Right : Component::Left;
@@ -242,6 +244,9 @@ public:
         case BatteryStatus::Charging:
             statusStr = "Charging";
             break;
+        case BatteryStatus::OptimizedCharging:
+            statusStr = "Optimized charging";
+            break;
         case BatteryStatus::Discharging:
             statusStr = "Discharging";
             break;
@@ -259,13 +264,16 @@ public:
     Component getSecondaryPod() const { return secondaryPod; }
 
     quint8 getLeftPodLevel() const { return states.value(Component::Left).level; }
-    bool isLeftPodCharging() const { return isStatus(Component::Left, BatteryStatus::Charging); }
+    bool isLeftPodCharging() const { return isCharging(Component::Left); }
+    bool isLeftPodOptimizedCharging() const { return isStatus(Component::Left, BatteryStatus::OptimizedCharging); }
     bool isLeftPodAvailable() const { return !isStatus(Component::Left, BatteryStatus::Disconnected); }
     quint8 getRightPodLevel() const { return states.value(Component::Right).level; }
-    bool isRightPodCharging() const { return isStatus(Component::Right, BatteryStatus::Charging); }
+    bool isRightPodCharging() const { return isCharging(Component::Right); }
+    bool isRightPodOptimizedCharging() const { return isStatus(Component::Right, BatteryStatus::OptimizedCharging); }
     bool isRightPodAvailable() const { return !isStatus(Component::Right, BatteryStatus::Disconnected); }
     quint8 getCaseLevel() const { return states.value(Component::Case).level; }
-    bool isCaseCharging() const { return isStatus(Component::Case, BatteryStatus::Charging); }
+    bool isCaseCharging() const { return isCharging(Component::Case); }
+    bool isCaseOptimizedCharging() const { return isStatus(Component::Case, BatteryStatus::OptimizedCharging); }
     bool isCaseAvailable() const { return !isStatus(Component::Case, BatteryStatus::Disconnected); }
 
     // Case battery from BLE manufacturer-data path. parseEncryptedPacket
@@ -275,20 +283,20 @@ public:
     // broadcasting its battery via BLE adv. This setter feeds the
     // BLE-parsed level + charging directly so the case row in PodsMenu
     // can show real numbers during lid-open events. level=-1 from BLE
-    // means "case battery unknown" (nibble == 15) — caller should skip
+    // means "case battery unknown" (nibble == 15), so the caller skips
     // those packets to avoid overwriting a valid prior reading.
     void setCaseFromBle(int level, bool charging)
     {
         if (level < 0 || level > 100) return;
-        const BatteryStatus newStatus =
-            charging ? BatteryStatus::Charging : BatteryStatus::Discharging;
+        const BatteryStatus newStatus = chargingStatus(Component::Case, charging);
         const auto current = states.value(Component::Case);
         if (current.level == level && current.status == newStatus) return;
         states[Component::Case] = {static_cast<quint8>(level), newStatus};
         emit batteryStatusChanged();
     }
     quint8 getHeadsetLevel() const { return states.value(Component::Headset).level; }
-    bool isHeadsetCharging() const { return isStatus(Component::Headset, BatteryStatus::Charging); }
+    bool isHeadsetCharging() const { return isCharging(Component::Headset); }
+    bool isHeadsetOptimizedCharging() const { return isStatus(Component::Headset, BatteryStatus::OptimizedCharging); }
     bool isHeadsetAvailable() const { return !isStatus(Component::Headset, BatteryStatus::Disconnected); }
 
 signals:
@@ -299,6 +307,22 @@ private:
     bool isStatus(Component component, BatteryStatus status) const
     {
         return states.value(component).status == status;
+    }
+
+    // Optimized charging is still on the charger, so the charging accessors and the low-battery latch count it.
+    bool isCharging(Component component) const
+    {
+        return isStatus(component, BatteryStatus::Charging) || isStatus(component, BatteryStatus::OptimizedCharging);
+    }
+
+    // A BLE charging bit cannot tell optimized from plain charging, so it must not demote a stored OptimizedCharging.
+    BatteryStatus chargingStatus(Component component, bool charging) const
+    {
+        if (!charging)
+        {
+            return BatteryStatus::Discharging;
+        }
+        return isStatus(component, BatteryStatus::OptimizedCharging) ? BatteryStatus::OptimizedCharging : BatteryStatus::Charging;
     }
 
     std::pair<bool, int> formatBattery(unsigned char byteVal)
