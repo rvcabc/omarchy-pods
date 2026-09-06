@@ -4,6 +4,7 @@
 #include <QTextStream>
 
 #include "ipcpath.hpp"
+#include "verbtable.hpp"
 
 int main(int argc, char *argv[]) {
     QCoreApplication app(argc, argv);
@@ -14,32 +15,18 @@ int main(int argc, char *argv[]) {
         // QCoreApplication can't tell us its file path.
         const QString self = QFileInfo(QCoreApplication::applicationFilePath()).fileName();
         const QString prog = self.isEmpty() ? QStringLiteral("openpods-ctl") : self;
-        QTextStream(stderr) << "Usage: " << prog << " <command>\n"
-                            << "Commands:\n"
-                            << "  status              Print one-line JSON status snapshot to stdout\n"
-                            << "  noise:off           Disable noise control\n"
-                            << "  noise:anc           Enable Active Noise Cancellation\n"
-                            << "  noise:transparency  Enable Transparency mode\n"
-                            << "  noise:adaptive      Enable Adaptive mode\n"
-                            << "  noise:cycle         Advance to the next mode (Off->ANC->Trans->Adaptive)\n"
-                            << "  ear:off             Disable automatic ear-detection auto-pause/resume\n"
-                            << "  ear:one             Pause when either pod is removed (default)\n"
-                            << "  ear:both            Pause only when both pods are removed\n"
-                            << "  forget              Run `bluetoothctl remove` on the connected device\n"
-                            << "  ca:on               Enable Conversation Awareness (Pro2 only)\n"
-                            << "  ca:off              Disable Conversation Awareness\n"
-                            << "  disconnect          bluetoothctl disconnect on the paired AirPods\n"
-                            << "  connect             bluetoothctl connect on the paired AirPods\n"
-                            << "  adaptive:N          Set Adaptive Noise level 0-100 (Pro2/Pro3, only while noise_mode=Adaptive)\n"
-                            << "  onebud:on           Enable One-Bud ANC (Pro2+: keep ANC active with only one pod in)\n"
-                            << "  onebud:off          Disable One-Bud ANC\n";
+        QTextStream err(stderr);
+        err << "Usage: " << prog << " <command>\n" << "Commands:\n";
+        // One line per verb table row, so the usage text and the daemon can never disagree.
+        for (const QString &line : OpenPods::Ipc::usageLines()) {
+            err << line << "\n";
+        }
         return 1;
     }
 
     const QByteArray cmd = QByteArray(argv[1]);
-    // reopen is the only other verb the daemon can refuse, and its refusal is a reply.
+    // status is the one verb whose reply carries data; every other verb answers ok or error, or closes quietly.
     const bool wantsStatus = (cmd == "status");
-    const bool wantsReply = wantsStatus || (cmd == "reopen");
 
     const QString ipcPath = OpenPods::Ipc::socketPath();
     if (ipcPath.isEmpty()) {
@@ -64,27 +51,26 @@ int main(int argc, char *argv[]) {
     // headroom without making the CLI feel laggy.
     socket.waitForBytesWritten(500);
 
-    if (wantsReply) {
-        // Daemon writes one JSON line then half-closes. Wait briefly
-        // for the response before tearing the socket down, otherwise
-        // the read silently returns empty.
-        if (!socket.waitForReadyRead(1000)) {
-            // A windowed daemon opens the window and closes the socket without answering, so that close is its yes.
-            if (cmd == "reopen" && socket.state() != QLocalSocket::ConnectedState) {
-                socket.disconnectFromServer();
-                return 0;
-            }
-            QTextStream(stderr) << "Timed out waiting for a reply to " << cmd << "\n";
+    // The daemon writes one line then half-closes. Wait briefly for it, otherwise the read returns empty.
+    if (!socket.waitForReadyRead(1000)) {
+        // A clean close with no bytes is a yes from a daemon that predates the reply contract, and from a
+        // windowed daemon answering reopen; status alone must carry data, so its silence is a failure.
+        if (!wantsStatus && socket.state() != QLocalSocket::ConnectedState) {
             socket.disconnectFromServer();
-            return 1;
+            return 0;
         }
-        const QByteArray reply = socket.readAll();
-        // A headless daemon refuses reopen with an error line rather than a status object.
-        if (reply.startsWith("error:")) {
-            QTextStream(stderr) << QString::fromUtf8(reply);
-            socket.disconnectFromServer();
-            return 1;
-        }
+        QTextStream(stderr) << "Timed out waiting for a reply to " << cmd << "\n";
+        socket.disconnectFromServer();
+        return 1;
+    }
+    const QByteArray reply = socket.readAll();
+    if (reply.startsWith("error:")) {
+        QTextStream(stderr) << QString::fromUtf8(reply);
+        socket.disconnectFromServer();
+        return 1;
+    }
+    // ok is the whole answer for a control verb, so only a status object reaches stdout.
+    if (wantsStatus || reply.trimmed() != "ok") {
         QTextStream(stdout) << QString::fromUtf8(reply);
     }
 

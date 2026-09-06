@@ -1,4 +1,4 @@
-// Pins librepods-ctl's exit codes, since a windowed daemon answers reopen with silence and a headless one with a refusal.
+// Pins librepods-ctl's exit codes: every verb answers ok or error, a silent close is a yes for all but status.
 
 #include "ipcpath.hpp"
 
@@ -66,6 +66,52 @@ private slots:
 
         QCOMPARE(run.exitCode, 1);
         QVERIFY(run.err.startsWith("Timed out waiting for a reply to reopen"));
+    }
+
+    void controlVerbAnsweredOk_succeedsQuietly()
+    {
+        m_reply = "ok\n";
+
+        Run run;
+        runCtl("noise:anc", run);
+
+        QCOMPARE(run.exitCode, 0);
+        QCOMPARE(run.err, QByteArray());
+        QCOMPARE(run.out, QByteArray());
+    }
+
+    void controlVerbAnsweredWithSilence_succeedsQuietly()
+    {
+        // A daemon older than the reply contract closes without a byte, which is the install window case.
+        Run run;
+        runCtl("noise:anc", run);
+
+        QCOMPARE(run.exitCode, 0);
+        QCOMPARE(run.err, QByteArray());
+        QCOMPARE(run.out, QByteArray());
+    }
+
+    void controlVerbRefused_failsAndPrintsTheRefusal()
+    {
+        m_reply = "error: adaptive level applies only while noise_mode is adaptive\n";
+
+        Run run;
+        runCtl("adaptive:50", run);
+
+        QCOMPARE(run.exitCode, 1);
+        QCOMPARE(run.err, m_reply);
+        QCOMPARE(run.out, QByteArray());
+    }
+
+    void controlVerbLeftHanging_failsAndNamesTheVerb()
+    {
+        m_closeOnRead = false;
+
+        Run run;
+        runCtl("noise:anc", run);
+
+        QCOMPARE(run.exitCode, 1);
+        QVERIFY(run.err.startsWith("Timed out waiting for a reply to noise:anc"));
     }
 
     void statusAnswered_printsTheReplyOnStdout()
