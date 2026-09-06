@@ -291,6 +291,8 @@ private slots:
             QStringLiteral("  autoconnect:on|off      Connect to this computer automatically"),
             QStringLiteral("  allowautoconnect:on|off Allow automatic connection"),
             QStringLiteral("  rename:TEXT             Rename the AirPods (1 to 32 UTF-8 bytes)"),
+            QStringLiteral("  notify:MODE             Desktop toasts: on|off for all of them, connected:on|off for the battery banner on connect"),
+            QStringLiteral("  follow:on|off           Make the AirPods the default output when they connect"),
             QStringLiteral("  eq:TEXT                 Custom EQ: on|off:low:mid:high, each 0-100"),
         };
         const QStringList lines = usageLines();

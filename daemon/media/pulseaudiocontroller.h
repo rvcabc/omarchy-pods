@@ -29,6 +29,9 @@ public:
 
     bool initialize();
     QString getDefaultSink();
+    // The sink whose name carries the pods MAC with underscores, or empty when the card exposes no sink yet.
+    QString getSinkForDevice(const QString &macAddress);
+    bool setDefaultSink(const QString &sinkName);
     int getSinkVolume(const QString &sinkName);
     bool setSinkVolume(const QString &sinkName, int volumePercent);
 

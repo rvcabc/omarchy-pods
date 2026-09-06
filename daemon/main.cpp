@@ -117,6 +117,7 @@ public:
         // Initialize MediaController and connect signals
         mediaController = new MediaController(this);
         connect(mediaController, &MediaController::mediaStateChanged, this, &AirPodsTrayApp::handleMediaStateChange);
+        mediaController->setFollowOnConnect(loadFollowOnConnect());
         mediaController->followMediaChanges();
 
         monitor = new BluetoothMonitor(this);
@@ -295,6 +296,7 @@ public slots:
         const QString addr = m_deviceInfo->bluetoothAddress();
         LOG_INFO("disconnectAirPods: " << addr);
         ++m_disconnectCallsTotal;
+        m_disconnectRequested = true;
         auto *proc = new QProcess(this);
         connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
                 proc, [this, proc, addr](int code, QProcess::ExitStatus) {
@@ -451,23 +453,26 @@ public slots:
             bool available;
             bool charging;
             LowBatteryLatch *latch;
+            Notifier::Channel channel;
         };
         const Source sources[] = {
             { "Left",  b->getLeftPodLevel(),  b->isLeftPodAvailable(),
-              b->isLeftPodCharging(),  &m_lowBatteryLatchLeft },
+              b->isLeftPodCharging(),  &m_lowBatteryLatchLeft, Notifier::Channel::LowBatteryLeft },
             { "Right", b->getRightPodLevel(), b->isRightPodAvailable(),
-              b->isRightPodCharging(), &m_lowBatteryLatchRight },
+              b->isRightPodCharging(), &m_lowBatteryLatchRight, Notifier::Channel::LowBatteryRight },
             { "Case",  b->getCaseLevel(),     b->isCaseAvailable(),
-              b->isCaseCharging(),     &m_lowBatteryLatchCase },
+              b->isCaseCharging(),     &m_lowBatteryLatchCase, Notifier::Channel::LowBatteryCase },
         };
 
+        Notifier::Options options;
+        options.urgency = QStringLiteral("normal");
         for (const Source &s : sources)
         {
             const auto fire = s.latch->evaluate(s.level, s.available, s.charging);
             if (fire) {
-                m_notifier->notify(
+                m_notifier->notify(s.channel,
                     tr("%1 AirPod Low Battery").arg(QString::fromLatin1(s.label)),
-                    tr("%1% remaining").arg(*fire));
+                    tr("%1% remaining").arg(*fire), options);
             }
         }
     }
@@ -1048,11 +1053,15 @@ private slots:
         // fires PropertiesChanged Connected=false on suspend and the user
         // doesn't want to see "AirPods Disconnected" every time they close
         // the lid. Tray icon still resets so visual state is accurate.
-        if (!m_isSuspending) {
-            m_notifier->notify(
+        // A disconnect the user asked for through the verb needs no toast either.
+        if (!m_isSuspending && !m_disconnectRequested) {
+            m_notifier->notify(Notifier::Channel::Disconnected,
                 tr("AirPods Disconnected"),
                 tr("Your AirPods have been disconnected"));
         }
+        m_disconnectRequested = false;
+        m_connectedBannerPending = false;
+        mediaController->startFollowSession();
         if (trayManager) {
             trayManager->resetTrayIcon();
         }
@@ -1431,6 +1440,7 @@ private slots:
         }
         else if (data.startsWith(AirPodsPackets::Parse::FEATURES_ACK))
         {
+            m_connectedBannerPending = true;
             writePacketToSocket(requestNotificationsPacket(), "Request notifications packet written: ");
 
             QTimer::singleShot(2000, this, [this]() {
@@ -1493,6 +1503,12 @@ private slots:
             m_deviceInfo->getBattery()->parsePacket(data);
             m_deviceInfo->updateBatteryStatus();
             LOG_INFO("Battery status: " << m_deviceInfo->batteryStatus());
+            if (m_connectedBannerPending)
+            {
+                m_connectedBannerPending = false;
+                showBatteryBanner(tr("%1 connected").arg(podsDisplayName()),
+                                  {QStringLiteral("omarchy-shell"), QStringLiteral("omapods"), QStringLiteral("open")});
+            }
         }
         // Conversational Awareness Data
         else if (data.size() == 10 && data.startsWith(AirPodsPackets::ConversationalAwareness::DATA_HEADER))
@@ -1682,9 +1698,52 @@ private slots:
                 m_deviceInfo->getBattery()->setCaseFromBle(device.caseBattery, device.caseCharging);
             }
             m_deviceInfo->getEarDetection()->overrideEarDetectionStatus(device.isPrimaryInEar, device.isSecondaryInEar);
+            // macOS shows the battery card when the lid opens nearby; the banner is only useful while the link is down.
+            const bool lidJustOpened = m_lidState != BleInfo::LidState::OPEN && device.lidState == BleInfo::LidState::OPEN;
             m_lidState = device.lidState;
+            if (lidJustOpened && !areAirpodsConnected())
+            {
+                showBatteryBanner(podsDisplayName(), {});
+            }
         }
     }
+
+    QString podsDisplayName() const
+    {
+        if (m_deviceInfo && m_deviceInfo->model() != AirPodsModel::Unknown) {
+            return modelDisplayName(m_deviceInfo->model());
+        }
+        if (m_deviceInfo && !m_deviceInfo->deviceName().isEmpty()) {
+            return m_deviceInfo->deviceName();
+        }
+        return tr("AirPods");
+    }
+
+    // One channel for both the lid-open card and the connect banner, so the second replaces the first instead of stacking.
+    void showBatteryBanner(const QString &title, const QStringList &execArgv)
+    {
+        if (!loadConnectedBannerEnabled() || !m_deviceInfo) {
+            return;
+        }
+        Battery *b = m_deviceInfo->getBattery();
+        const QString body = Notifier::batteryBanner(b->isLeftPodAvailable(), b->getLeftPodLevel(),
+                                                     b->isRightPodAvailable(), b->getRightPodLevel(),
+                                                     b->isCaseAvailable(), b->getCaseLevel());
+        if (body.isEmpty()) {
+            return;
+        }
+        Notifier::Options options;
+        options.urgency = QStringLiteral("low");
+        options.timeoutMs = connectedBannerTimeoutMs;
+        options.execArgv = execArgv;
+        m_notifier->notify(Notifier::Channel::Connected, title, body, options);
+    }
+
+public:
+    bool loadConnectedBannerEnabled() const { return m_settings->value("notifications/connected", true).toBool(); }
+    void saveConnectedBannerEnabled(bool enabled) { m_settings->setValue("notifications/connected", enabled); }
+    bool loadFollowOnConnect() const { return m_settings->value("audio/followOnConnect", true).toBool(); }
+    void saveFollowOnConnect(bool follow) { m_settings->setValue("audio/followOnConnect", follow); mediaController->setFollowOnConnect(follow); }
 
 public:
     void handleMediaStateChange(MediaController::MediaState state) {
@@ -1841,6 +1900,11 @@ private:
     // Every control command the pods echoed this session, keyed by id.
     OpenPods::ControlCommandState m_controlCommands;
     int m_settingChangesTotal = 0;
+    // Set by the disconnect verb so the toast that follows is not shown for a disconnect the user asked for.
+    bool m_disconnectRequested = false;
+    // Armed at FEATURES_ACK and spent on the first battery frame, which is when the banner has numbers to show.
+    bool m_connectedBannerPending = false;
+    static constexpr int connectedBannerTimeoutMs = 5000;
     // CC 0x0A toggles ear detection on the buds themselves; the host-side pause policy is separate.
     static constexpr quint8 earDetectionConfigId = 0x0A;
     static constexpr quint8 controlCommandOff = 0x02;
@@ -1954,6 +2018,9 @@ public:
         }
         status.insert("control_ids_seen", idsSeen);
         status.insert("setting_changes_total", m_settingChangesTotal);
+        status.insert("notifications_enabled", m_notifier->enabled());
+        status.insert("notifications_connected", loadConnectedBannerEnabled());
+        status.insert("audio_follow_on_connect", mediaController->followOnConnect());
         // Each setting reads from the echo when the pods sent one, else from the persisted wish; absent means neither.
         for (const OpenPods::PodSettings::Spec &spec : OpenPods::PodSettings::table()) {
             const std::optional<QByteArray> bytes = currentSettingBytes(spec.id);
@@ -2332,6 +2399,15 @@ int main(int argc, char *argv[]) {
                 refusal = trayAppPtr->renameAirPods(parsed.text);
             } else if (parsed.verb == QLatin1String("eq")) {
                 refusal = trayAppPtr->setCustomEq(parsed.text);
+            } else if (parsed.verb == QLatin1String("notify")) {
+                const bool on = parsed.choice.endsWith(QLatin1String("on"));
+                if (parsed.choice.startsWith(QLatin1String("connected:"))) {
+                    trayAppPtr->saveConnectedBannerEnabled(on);
+                } else {
+                    trayAppPtr->setNotificationsEnabled(on);
+                }
+            } else if (parsed.verb == QLatin1String("follow")) {
+                trayAppPtr->saveFollowOnConnect(parsed.choice == QLatin1String("on"));
             } else if (const auto spec = OpenPods::PodSettings::forVerb(parsed.verb)) {
                 refusal = trayAppPtr->setPodSetting(*spec, parsed);
             } else {

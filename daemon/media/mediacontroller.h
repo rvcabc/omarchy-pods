@@ -47,6 +47,10 @@ public:
   bool restartWirePlumber();
 
   void setEarDetectionBehavior(EarDetectionBehavior behavior);
+  // Audio follows the pods once per control-link session; the disconnect finalizer starts the next one.
+  void setFollowOnConnect(bool follow) { m_followOnConnect = follow; }
+  bool followOnConnect() const { return m_followOnConnect; }
+  void startFollowSession() { m_defaultSinkClaimedThisSession = false; }
   inline EarDetectionBehavior getEarDetectionBehavior() const { return earDetectionBehavior; }
 
   void play();
@@ -83,6 +87,8 @@ private:
   // The level stream has no guaranteed restore frame, so the tracker bounds a duck with this timer.
   OpenPods::Conversation::LevelTracker m_conversation;
   QTimer *m_conversationRestoreTimer = nullptr;
+  bool m_followOnConnect = true;
+  bool m_defaultSinkClaimedThisSession = false;
 };
 
 #endif // MEDIACONTROLLER_H

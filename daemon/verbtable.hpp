@@ -98,6 +98,9 @@ namespace OpenPods::Ipc
             {"autoconnect", Kind::Bool, nullptr, 0, 0, "Connect to this computer automatically"},
             {"allowautoconnect", Kind::Bool, nullptr, 0, 0, "Allow automatic connection"},
             {"rename", Kind::Text, nullptr, textMinBytes, renameMaxBytes, "Rename the AirPods (1 to 32 UTF-8 bytes)"},
+            {"notify", Kind::Choice, "on|off|connected:on|connected:off", 0, 0,
+             "Desktop toasts: on|off for all of them, connected:on|off for the battery banner on connect"},
+            {"follow", Kind::Bool, nullptr, 0, 0, "Make the AirPods the default output when they connect"},
             {"eq", Kind::Text, nullptr, textMinBytes, eqMaxBytes, "Custom EQ: on|off:low:mid:high, each 0-100"},
         };
         return table;

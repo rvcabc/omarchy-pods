@@ -289,6 +289,19 @@ bool MediaController::activateA2dpProfile() {
     LOG_INFO("Profile activated: " << preferredProfile);
   }
 
+  // One default-sink claim per session: WirePlumber then re-links every untargeted stream itself, and sink inputs are never moved here because a moved stream is pinned to the pods for good.
+  if (m_followOnConnect && !m_defaultSinkClaimedThisSession) {
+    const QString podsSink = m_pulseAudio->getSinkForDevice(connectedDeviceMacAddress);
+    if (podsSink.isEmpty()) {
+      LOG_WARN("No sink carries " << connectedDeviceMacAddress << " yet, audio cannot follow the pods");
+    } else if (m_pulseAudio->setDefaultSink(podsSink)) {
+      LOG_INFO("Default sink set to " << podsSink << " so audio follows the pods");
+      m_defaultSinkClaimedThisSession = true;
+    } else {
+      LOG_WARN("Could not make " << podsSink << " the default sink");
+    }
+  }
+
   // AirPods stem swipes write 1/15 steps over AVRCP, so snap them onto the 5% grid.
   QString sink = m_pulseAudio->getDefaultSink();
   if (!sink.isEmpty() && sink.contains(connectedDeviceMacAddress)) {
