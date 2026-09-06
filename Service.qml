@@ -30,6 +30,15 @@ Item {
   property var rightPod: Model.defaultPod()
   property var caseBattery: ({ level: Model.LEVEL_UNKNOWN, charging: false })
   property var headsetBattery: ({ level: Model.LEVEL_UNKNOWN, charging: false })
+  property string firmwareVersion: ""
+  property string hardwareRevision: ""
+  property string serialNumber: ""
+  property string leftSerial: ""
+  property string rightSerial: ""
+  // Every setting the daemon has heard or been asked for, keyed as status.json spells them; absent means neither.
+  property var podSettings: ({})
+  // Control-command ids the pods echoed this session, as "0x34" strings.
+  property var controlIdsSeen: []
   property string lastError: ""
   property string actionStatus: ""
 
@@ -51,14 +60,13 @@ Item {
   readonly property int settleHoldMs: 4000
   readonly property int actionStatusMs: 2200
 
-  // Held over incoming reads until the daemon agrees, so a write already in flight
-  // when the click landed cannot snap the control back.
-  property string _pendingField: ""
-  property var _pendingValue: null
-
-  // Single slot: a verb sent while another is in flight replaces the queued one
-  // rather than being dropped, which is what arrow-key repeat produces.
-  property var _queued: null
+  // One hold per field, { value, untilMs }, so a write in flight for one control
+  // cannot snap another back and an incoming read cannot undo a click the daemon
+  // has not answered yet.
+  property var _pending: ({})
+  // Verbs waiting for the running librepods-ctl, oldest first.
+  property var _queue: []
+  property var _inFlight: null
 
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
@@ -109,44 +117,67 @@ Item {
     caseBattery = status.caseBattery
     headsetBattery = status.headset
     lidState = status.lidState
+    firmwareVersion = status.firmwareVersion
+    hardwareRevision = status.hardwareRevision
+    serialNumber = status.serialNumber
+    leftSerial = status.leftSerial
+    rightSerial = status.rightSerial
+    controlIdsSeen = status.controlIdsSeen
 
-    noiseMode = _settle("noiseMode", status.noiseMode)
-    adaptiveNoiseLevel = _settle("adaptiveNoiseLevel", status.adaptiveNoiseLevel)
-    oneBudANC = _settle("oneBudANC", status.oneBudANC)
-    conversationalAwareness = _settle("conversationalAwareness", status.conversationalAwareness)
-    earDetectionBehavior = _settle("earDetectionBehavior", status.earDetectionBehavior)
+    var now = Date.now()
+    noiseMode = _settle("noiseMode", status.noiseMode, now)
+    adaptiveNoiseLevel = _settle("adaptiveNoiseLevel", status.adaptiveNoiseLevel, now)
+    oneBudANC = _settle("oneBudANC", status.oneBudANC, now)
+    conversationalAwareness = _settle("conversationalAwareness", status.conversationalAwareness, now)
+    earDetectionBehavior = _settle("earDetectionBehavior", status.earDetectionBehavior, now)
+    var settled = Model.settlePodSettings(_pending, status.podSettings, now)
+    _pending = settled.pending
+    podSettings = settled.podSettings
+    _armSettleTimer()
   }
 
-  function _settle(field, reported) {
-    if (_pendingField !== field) return reported
-    if (reported === _pendingValue) {
-      _clearPending()
-      return reported
+  function _settle(field, reported, nowMs) {
+    var settled = Model.settle(_pending, field, reported, nowMs)
+    _pending = settled.pending
+    return settled.value
+  }
+
+  // A pod setting lives in the podSettings map; the five listening controls are properties of their own.
+  function _show(field, value) {
+    var spec = Model.settingByField(field)
+    if (spec) podSettings = Model.withSetting(podSettings, spec.key, value)
+    else root[field] = value
+  }
+
+  function _armSettleTimer() {
+    var until = Model.earliestUntilMs(_pending)
+    if (until === Model.HOLD_NONE) {
+      settleTimer.stop()
+      return
     }
-    return _pendingValue
-  }
-
-  function _clearPending() {
-    _pendingField = ""
-    _pendingValue = null
-    settleTimer.stop()
+    settleTimer.interval = Math.max(0, until - Date.now())
+    settleTimer.restart()
   }
 
   function _send(verb, field, optimistic) {
     if (verb === "") return
+    _pending = Model.pendingAfter(_pending, field, optimistic, Date.now(), settleHoldMs)
+    _show(field, optimistic)
+    _armSettleTimer()
+    var item = { verb: verb, field: field, optimistic: optimistic }
     if (commandProcess.running) {
-      _queued = { verb: verb, field: field, optimistic: optimistic }
-      _pendingField = field
-      _pendingValue = optimistic
-      root[field] = optimistic
-      settleTimer.restart()
+      _queue = Model.enqueue(_queue, item)
       return
     }
-    _pendingField = field
-    _pendingValue = optimistic
-    root[field] = optimistic
-    settleTimer.restart()
-    commandProcess.command = [ctlPath, verb]
+    _run(item)
+  }
+
+  function _run(item) {
+    _inFlight = item
+    // The hold restarts as the verb goes out, so a click that waited in the queue keeps its full hold.
+    _pending = Model.pendingAfter(_pending, item.field, item.optimistic, Date.now(), settleHoldMs)
+    _armSettleTimer()
+    commandProcess.command = [ctlPath, item.verb]
     commandProcess.running = true
   }
 
@@ -190,13 +221,23 @@ Item {
     setEarDetectionBehavior((earDetectionBehavior + 1) % Model.EAR_BEHAVIOR_COUNT)
   }
 
+  // Every daemon setting goes through here; Model.SETTINGS is the spec, and a value it rejects is a caller bug, not a user error.
+  function setPodSetting(key, value) {
+    var verb = Model.settingVerb(key, value)
+    if (verb === "") {
+      console.warn("omapods: setPodSetting(" + key + ") rejected " + JSON.stringify(value))
+      return
+    }
+    var spec = Model.settingByKey(key)
+    _send(verb, spec.field, Model.settingValueFrom(spec, value))
+  }
+
   Timer {
-    // Bounds the optimistic hold, and re-reads because a verb that changed nothing
+    // Fires when the earliest hold ends and re-reads, because a verb that changed nothing
     // leaves the daemon's file untouched, so no watch fires to correct the display.
     id: settleTimer
-    interval: root.settleHoldMs
     repeat: false
-    onTriggered: { root._clearPending(); root.refresh() }
+    onTriggered: root.refresh()
   }
 
   Timer {
@@ -223,20 +264,20 @@ Item {
     command: []
     stderr: StdioCollector { id: commandErr; waitForEnd: true }
     onExited: function (exitCode) {
+      var done = root._inFlight
+      root._inFlight = null
       if (exitCode !== 0) {
-        // Clearing the hold also stops the timer that would have re-read, so do it here.
-        root._clearPending()
+        // Only the refused verb's hold goes; the others are still waiting on their own answers.
+        root._pending = Model.dropHold(root._pending, done.field)
+        root._armSettleTimer()
         root.refresh()
-        root._queued = null
         // Its own field with its own timer, or the next status read wipes it unread.
         root.actionStatus = Model.elideError(commandErr.text || "librepods-ctl rejected the command")
         actionStatusTimer.restart()
       }
-      if (root._queued) {
-        var next = root._queued
-        root._queued = null
-        root._send(next.verb, next.field, next.optimistic)
-      }
+      var next = Model.dequeue(root._queue)
+      root._queue = next.queue
+      if (next.item) root._run(next.item)
     }
   }
 }

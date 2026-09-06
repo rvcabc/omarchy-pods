@@ -3,7 +3,7 @@
 
 const source = Deno.readTextFileSync(new URL("../Model.js", import.meta.url))
 const Model = new Function(
-  source + "; return { parseStatus, podFrom, defaultPod, noiseModeVerb, earDetectionVerb, levelFraction, levelText, podMeta, elideError, availableModes, NOISE_OFF, NOISE_ANC, NOISE_TRANSPARENCY, NOISE_ADAPTIVE, LEVEL_UNKNOWN, NOISE_UNKNOWN, EAR_PAUSE_ONE_OUT, LID_UNKNOWN, MAX_ERROR_CHARS }"
+  source + "; return { parseStatus, podFrom, defaultPod, noiseModeVerb, earDetectionVerb, levelFraction, levelText, podMeta, elideError, availableModes, NOISE_OFF, NOISE_ANC, NOISE_TRANSPARENCY, NOISE_ADAPTIVE, LEVEL_UNKNOWN, NOISE_UNKNOWN, EAR_PAUSE_ONE_OUT, LID_UNKNOWN, MAX_ERROR_CHARS, SETTINGS, NO_CONTROL_ID, HOLD_NONE, RENAME_MAX_BYTES, settingByKey, settingByField, settingVerb, settingValueFrom, settingConfirmed, utf8ByteCount, maskFromModes, modesFromMask, pendingAfter, dropHold, settle, earliestUntilMs, settlePodSettings, withSetting, enqueue, dequeue }"
 )()
 
 let failures = 0
@@ -136,6 +136,169 @@ check("a Pro 3 loses Off and keeps Adaptive", modesFor(good),
   [Model.NOISE_TRANSPARENCY, Model.NOISE_ADAPTIVE, Model.NOISE_ANC])
 check("a Max 2 gets all four", modesFor(max2),
   [Model.NOISE_OFF, Model.NOISE_TRANSPARENCY, Model.NOISE_ADAPTIVE, Model.NOISE_ANC])
+
+
+// The settings table: every row names its verb, and the verb text is built from the table rather than typed per call site.
+for (const spec of Model.SETTINGS) {
+  if (spec.kind === "bool") check(spec.key + " on", Model.settingVerb(spec.key, true), spec.verb + ":on")
+  if (spec.kind === "bool") check(spec.key + " off", Model.settingVerb(spec.key, false), spec.verb + ":off")
+  if (spec.kind === "bool") check(spec.key + " rejects a number", Model.settingVerb(spec.key, 1), "")
+  check(spec.key + " is found by key", Model.settingByKey(spec.key), spec)
+  check(spec.key + " is found by field", Model.settingByField(spec.field), spec)
+}
+check("the table has every daemon setting", Model.SETTINGS.length, 18)
+check("an unknown key is not found", Model.settingByKey("volume"), null)
+check("an unknown key makes no verb", Model.settingVerb("volume", 50), "")
+
+check("mic choice", Model.settingVerb("mic_mode", "left"), "mic:left")
+check("mic rejects an unknown choice", Model.settingVerb("mic_mode", "both"), "")
+check("mic rejects a number", Model.settingVerb("mic_mode", 2), "")
+check("swipe speed choice", Model.settingVerb("volume_swipe_speed", "longest"), "swipespeed:longest")
+check("press speed choice", Model.settingVerb("press_speed", "slowest"), "pressspeed:slowest")
+check("hold duration choice", Model.settingVerb("hold_duration", "shortest"), "holdduration:shortest")
+
+check("tone level", Model.settingVerb("tone_volume", 40), "tone:40")
+check("tone at the floor", Model.settingVerb("tone_volume", 0), "tone:0")
+check("tone at the ceiling", Model.settingVerb("tone_volume", 100), "tone:100")
+check("tone over the ceiling", Model.settingVerb("tone_volume", 101), "")
+check("tone below the floor", Model.settingVerb("tone_volume", -1), "")
+check("tone rejects a fraction", Model.settingVerb("tone_volume", 40.5), "")
+check("tone rejects a numeric string", Model.settingVerb("tone_volume", "40"), "")
+
+check("hold modes mask", Model.settingVerb("hold_cycle_modes", 7), "holdmodes:7")
+check("hold modes all four", Model.settingVerb("hold_cycle_modes", 15), "holdmodes:15")
+check("hold modes rejects an empty cycle", Model.settingVerb("hold_cycle_modes", 0), "")
+check("hold modes rejects a fifth bit", Model.settingVerb("hold_cycle_modes", 16), "")
+
+check("hold left side", Model.settingVerb("hold_left", "noise"), "hold:left:noise")
+check("hold right side", Model.settingVerb("hold_right", "siri"), "hold:right:siri")
+check("hold off", Model.settingVerb("hold_left", "off"), "hold:left:off")
+check("hold rejects an unknown action", Model.settingVerb("hold_left", "camera"), "")
+
+check("rename", Model.settingVerb("device_name", "My Pods"), "rename:My Pods")
+check("rename keeps a colon", Model.settingVerb("device_name", "Pods: Bryce"), "rename:Pods: Bryce")
+check("rename rejects empty", Model.settingVerb("device_name", ""), "")
+check("rename rejects a non-string", Model.settingVerb("device_name", 42), "")
+check("rename at 32 ascii bytes", Model.settingVerb("device_name", "a".repeat(32)), "rename:" + "a".repeat(32))
+check("rename over 32 ascii bytes", Model.settingVerb("device_name", "a".repeat(33)), "")
+// Seventeen two-byte characters is 34 bytes, so the byte limit trips where a character count would not.
+check("rename counts bytes, not characters", Model.settingVerb("device_name", "é".repeat(17)), "")
+check("rename at 32 bytes of two-byte characters", Model.settingVerb("device_name", "é".repeat(16)), "rename:" + "é".repeat(16))
+check("the curly apostrophe is three bytes", Model.utf8ByteCount("GM’s AirPods Pro"), 18)
+check("an emoji is four bytes", Model.utf8ByteCount("\u{1F3A7}"), 4)
+
+check("eq on", Model.settingVerb("custom_eq", { enabled: true, low: 50, mid: 50, high: 50 }), "eq:on:50:50:50")
+check("eq off keeps the bands", Model.settingVerb("custom_eq", { enabled: false, low: 0, mid: 100, high: 30 }), "eq:off:0:100:30")
+check("eq rejects a band over 100", Model.settingVerb("custom_eq", { enabled: true, low: 101, mid: 50, high: 50 }), "")
+check("eq rejects a missing band", Model.settingVerb("custom_eq", { enabled: true, low: 50, mid: 50 }), "")
+check("eq rejects a non-boolean enabled", Model.settingVerb("custom_eq", { enabled: 1, low: 50, mid: 50, high: 50 }), "")
+check("eq rejects null", Model.settingVerb("custom_eq", null), "")
+
+// The mask round trips through the same NOISE_* constants the mode list uses.
+check("mask of Off, ANC and Transparency", Model.maskFromModes([Model.NOISE_OFF, Model.NOISE_ANC, Model.NOISE_TRANSPARENCY]), 7)
+check("mask of all four", Model.maskFromModes([Model.NOISE_OFF, Model.NOISE_ANC, Model.NOISE_TRANSPARENCY, Model.NOISE_ADAPTIVE]), 15)
+check("mask of Adaptive alone", Model.maskFromModes([Model.NOISE_ADAPTIVE]), 8)
+check("mask of nothing", Model.maskFromModes([]), 0)
+check("mask ignores an unknown mode", Model.maskFromModes([Model.NOISE_ANC, 7]), 2)
+check("modes from 7", Model.modesFromMask(7), [Model.NOISE_OFF, Model.NOISE_ANC, Model.NOISE_TRANSPARENCY])
+check("modes from 15", Model.modesFromMask(15), [Model.NOISE_OFF, Model.NOISE_ANC, Model.NOISE_TRANSPARENCY, Model.NOISE_ADAPTIVE])
+check("modes come back in mode order", Model.modesFromMask(Model.maskFromModes([Model.NOISE_ADAPTIVE, Model.NOISE_OFF])), [Model.NOISE_OFF, Model.NOISE_ADAPTIVE])
+check("modes from a fifth bit ignore it", Model.modesFromMask(16 | 2), [Model.NOISE_ANC])
+for (let mask = 1; mask <= 15; mask++) {
+  check("mask " + mask + " round trips", Model.maskFromModes(Model.modesFromMask(mask)), mask)
+}
+
+// Holds: the optimistic value stands until the daemon agrees or the hold expires, and each key settles on its own.
+const holdMs = 4000
+const clicked = 1000
+const held = Model.pendingAfter({}, "noiseMode", 2, clicked, holdMs)
+check("a hold records the value and its end", held, { noiseMode: { value: 2, untilMs: 5000 } })
+check("pendingAfter leaves its input alone", Model.pendingAfter(held, "oneBudANC", true, clicked, holdMs) !== held, true)
+check("a disagreeing report is held off", Model.settle(held, "noiseMode", 1, 2000), { value: 2, pending: held })
+check("an agreeing report ends the hold", Model.settle(held, "noiseMode", 2, 2000), { value: 2, pending: {} })
+check("an expired hold lets the report through", Model.settle(held, "noiseMode", 1, 5000), { value: 1, pending: {} })
+check("one ms before expiry still holds", Model.settle(held, "noiseMode", 1, 4999).value, 2)
+check("a field with no hold passes straight through", Model.settle(held, "oneBudANC", true, 2000), { value: true, pending: held })
+check("a hold hides an absent report", Model.settle(held, "noiseMode", undefined, 2000).value, 2)
+check("settle leaves its input alone", Model.settle(held, "noiseMode", 2, 2000).pending !== held, true)
+
+const two = Model.pendingAfter(held, "oneBudANC", true, 3000, holdMs)
+check("settling one key keeps the other", Model.settle(two, "noiseMode", 2, 3500).pending, { oneBudANC: { value: true, untilMs: 7000 } })
+check("expiring one key keeps the other", Model.settle(two, "noiseMode", 1, 5000).pending, { oneBudANC: { value: true, untilMs: 7000 } })
+check("dropHold removes only its key", Model.dropHold(two, "oneBudANC"), held)
+check("dropHold of an unheld key changes nothing", Model.dropHold(two, "lidState"), two)
+check("the earliest hold is the first to end", Model.earliestUntilMs(two), 5000)
+check("no hold means nothing to wait for", Model.earliestUntilMs({}), Model.HOLD_NONE)
+
+// Object values (the eq bands) settle by content, since two builds of the same bands are never the same reference.
+const eqValue = { enabled: true, low: 50, mid: 50, high: 50 }
+const eqHeld = Model.pendingAfter({}, "customEq", eqValue, clicked, holdMs)
+check("an equal object ends the hold", Model.settle(eqHeld, "customEq", { enabled: true, low: 50, mid: 50, high: 50 }, 2000).pending, {})
+check("a different object is held off", Model.settle(eqHeld, "customEq", { enabled: true, low: 50, mid: 50, high: 51 }, 2000).value, eqValue)
+
+// The settings map settles per key: a held key the daemon has not published yet shows, then goes absent when the hold ends.
+const allowHeld = Model.pendingAfter({}, "allowOff", true, clicked, holdMs)
+check("a held setting shows before the daemon publishes it", Model.settlePodSettings(allowHeld, {}, 2000).podSettings, { allow_off: true })
+check("a held setting keeps its hold while unpublished", Model.settlePodSettings(allowHeld, {}, 2000).pending, allowHeld)
+check("an expired unpublished setting stays absent", Model.settlePodSettings(allowHeld, {}, 5000), { podSettings: {}, pending: {} })
+check("a published match ends the hold", Model.settlePodSettings(allowHeld, { allow_off: true, mic_mode: "auto" }, 2000), { podSettings: { allow_off: true, mic_mode: "auto" }, pending: {} })
+check("a published mismatch is held off", Model.settlePodSettings(allowHeld, { allow_off: false }, 2000).podSettings, { allow_off: true })
+check("withSetting copies", Model.withSetting({ mic_mode: "auto" }, "allow_off", true), { mic_mode: "auto", allow_off: true })
+
+// The queue is first in, first out, and a repeat for a waiting field replaces it in place.
+const a = { verb: "ca:on", field: "conversationalAwareness", optimistic: true }
+const b = { verb: "onebud:off", field: "oneBudANC", optimistic: false }
+const c = { verb: "adaptive:60", field: "adaptiveNoiseLevel", optimistic: 60 }
+let queue = Model.enqueue(Model.enqueue(Model.enqueue([], a), b), c)
+check("three queued in order", queue, [a, b, c])
+let popped = Model.dequeue(queue)
+check("first out is the first in", popped.item, a)
+popped = Model.dequeue(popped.queue)
+check("second out is the second in", popped.item, b)
+popped = Model.dequeue(popped.queue)
+check("third out is the third in", popped.item, c)
+check("the queue is then empty", popped.queue, [])
+check("dequeue on empty yields nothing", Model.dequeue([]), { item: null, queue: [] })
+const c2 = { verb: "adaptive:70", field: "adaptiveNoiseLevel", optimistic: 70 }
+check("a repeat for a waiting field replaces it in place", Model.enqueue(Model.enqueue([a, c], b), c2), [a, c2, b])
+check("enqueue leaves its input alone", queue, [a, b, c])
+
+// A setting is confirmed once the pods have echoed its control command; rename and eq have none to wait for.
+check("allow_off echoed", Model.settingConfirmed("allow_off", ["0x0D", "0x34"]), true)
+check("allow_off not yet echoed", Model.settingConfirmed("allow_off", ["0x0D"]), false)
+check("allow_off with nothing echoed", Model.settingConfirmed("allow_off", []), false)
+check("both hold sides share one command", Model.settingConfirmed("hold_right", ["0x16"]), true)
+check("rename needs no echo", Model.settingConfirmed("device_name", []), true)
+check("eq needs no echo", Model.settingConfirmed("custom_eq", []), true)
+check("an unknown key is never confirmed", Model.settingConfirmed("volume", ["0x34"]), false)
+check("rename and eq are the only rows without an id", Model.SETTINGS.filter(s => s.id === Model.NO_CONTROL_ID).map(s => s.key), ["device_name", "custom_eq"])
+
+// The new status keys, present: one line with every kind of setting, the echo list and the identity strings.
+const withSettings = Model.parseStatus('{"allow_off":true,"case":{"available":true,"charging":true,"level":100,"optimized_charging":true},"connected":true,"control_ids_seen":["0x0D","0x1A","0x34"],"custom_eq":{"enabled":true,"high":50,"low":40,"mid":45},"device_name":"My Pods","firmware_version":"7E93","hardware_revision":"1.0.0","hold_cycle_modes":7,"hold_left":"noise","hold_right":"siri","left":{"available":true,"charging":false,"in_ear":true,"level":79,"optimized_charging":true},"left_serial":"LEFTSERIAL","mic_mode":"auto","right":{"available":true,"charging":true,"in_ear":false,"level":100,"optimized_charging":false},"right_serial":"RIGHTSERIAL","schema_version":1,"serial_number":"CASESERIAL","tone_volume":40}')
+check("settings line parses", withSettings.ok, true)
+check("podSettings carries exactly the keys sent", withSettings.podSettings,
+  { allow_off: true, hold_cycle_modes: 7, hold_left: "noise", hold_right: "siri", mic_mode: "auto", tone_volume: 40, device_name: "My Pods", custom_eq: { enabled: true, low: 40, mid: 45, high: 50 } })
+check("control ids seen", withSettings.controlIdsSeen, ["0x0D", "0x1A", "0x34"])
+check("firmware version", withSettings.firmwareVersion, "7E93")
+check("hardware revision", withSettings.hardwareRevision, "1.0.0")
+check("serial number", withSettings.serialNumber, "CASESERIAL")
+check("left serial", withSettings.leftSerial, "LEFTSERIAL")
+check("right serial", withSettings.rightSerial, "RIGHTSERIAL")
+check("left pod optimized charging", withSettings.left.optimizedCharging, true)
+check("right pod not optimized charging", withSettings.right.optimizedCharging, false)
+check("a bool setting sent as a string is not true", Model.parseStatus('{"schema_version":1,"allow_off":"true"}').podSettings, { allow_off: false })
+check("an eq reported with the bands in daemon order compares equal to a click", Model.settle(eqHeld, "customEq", Model.parseStatus('{"schema_version":1,"custom_eq":{"enabled":true,"high":50,"low":50,"mid":50}}').podSettings.custom_eq, 2000).pending, {})
+
+// The same keys absent: nothing is invented.
+// device_name predates the settings table, so the rename row is the one setting an older daemon reports.
+check("an older daemon reports only the name", good.podSettings, { device_name: "GM’s AirPods Pro" })
+check("an older daemon has no echo list", good.controlIdsSeen, [])
+check("an older daemon has no firmware version", good.firmwareVersion, "")
+check("an older daemon has no serials", [good.serialNumber, good.leftSerial, good.rightSerial], ["", "", ""])
+check("an older daemon's pods are not optimized charging", good.left.optimizedCharging, false)
+check("the default pod is not optimized charging", Model.defaultPod().optimizedCharging, false)
+check("an unavailable pod is not optimized charging", Model.podFrom({ available: false, optimized_charging: true }).optimizedCharging, false)
+check("device_name alone is a setting too", Model.parseStatus('{"schema_version":1,"device_name":"GM’s AirPods Pro"}').podSettings, { device_name: "GM’s AirPods Pro" })
 
 if (failures > 0) {
   console.log(failures + " failed")
