@@ -275,6 +275,13 @@ namespace AirPodsPackets
         }
     }
 
+    // CC 0x06: the host that owns the pods' audio; CLAIM before playing here, RELEASE when the user pauses.
+    namespace OwnsConnection
+    {
+        static const QByteArray CLAIM = ControlCommand::createCommand(0x06, 0x01);
+        static const QByteArray RELEASE = ControlCommand::createCommand(0x06, 0x00);
+    }
+
     // Parsing Headers
     namespace Parse
     {

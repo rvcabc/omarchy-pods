@@ -9,9 +9,11 @@
 PlayerStatusWatcher::PlayerStatusWatcher(const QString &playerService, QObject *parent)
     : QObject(parent),
       m_playerService(playerService),
-      m_iface(new QDBusInterface(playerService, "/org/mpris/MediaPlayer2",
+      m_iface(playerService.isEmpty() ? nullptr : new QDBusInterface(playerService, "/org/mpris/MediaPlayer2",
                                  "org.mpris.MediaPlayer2.Player", QDBusConnection::sessionBus(), this)),
-      m_serviceWatcher(new QDBusServiceWatcher(playerService, QDBusConnection::sessionBus(),
+      // An empty service means every player: browsers register and drop one name per tab, so the watcher is a wildcard.
+      m_serviceWatcher(new QDBusServiceWatcher(playerService.isEmpty() ? QStringLiteral("org.mpris.MediaPlayer2.*") : playerService,
+                                               QDBusConnection::sessionBus(),
                                                QDBusServiceWatcher::WatchForOwnerChange, this))
 {
     if (!QDBusConnection::sessionBus().connect(
@@ -32,23 +34,38 @@ void PlayerStatusWatcher::onPropertiesChanged(const QString &interface,
                                               const QStringList &)
 {
     if (interface == "org.mpris.MediaPlayer2.Player" && changed.contains("PlaybackStatus")) {
-        emit playbackStatusChanged(changed.value("PlaybackStatus").toString());
+        if (!m_playerService.isEmpty()) {
+            emit playbackStatusChanged(changed.value("PlaybackStatus").toString());
+        } else {
+            // One player's change is answered with the overall state, so a paused tab cannot mask a playing one.
+            updateStatus();
+        }
     }
 }
 
 void PlayerStatusWatcher::updateStatus() {
-    QVariant reply = m_iface->property("PlaybackStatus");
-    if (reply.isValid()) {
-        emit playbackStatusChanged(reply.toString());
+    if (m_iface) {
+        QVariant reply = m_iface->property("PlaybackStatus");
+        if (reply.isValid()) {
+            emit playbackStatusChanged(reply.toString());
+            return;
+        }
     }
+    emit playbackStatusChanged(getCurrentPlaybackStatus(m_playerService));
 }
 
 void PlayerStatusWatcher::onServiceOwnerChanged(const QString &name, const QString &, const QString &newOwner)
 {
-    if (name == m_playerService && newOwner.isEmpty()) {
-        emit playbackStatusChanged(""); // player disappeared
-    } else if (name == m_playerService && !newOwner.isEmpty()) {
-        updateStatus(); // player appeared/reappeared
+    if (!m_playerService.isEmpty()) {
+        if (name == m_playerService && newOwner.isEmpty()) {
+            emit playbackStatusChanged(""); // player disappeared
+        } else if (name == m_playerService && !newOwner.isEmpty()) {
+            updateStatus(); // player appeared/reappeared
+        }
+        return;
+    }
+    if (name.startsWith("org.mpris.MediaPlayer2.")) {
+        updateStatus();
     }
 }
 

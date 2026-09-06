@@ -194,3 +194,14 @@ openpods_add_test(tst_podsettings
     tst_podsettings.cpp
     ../podsettings.hpp
 )
+
+openpods_add_test(tst_audiosource
+    tst_audiosource.cpp
+    ../audiosource.hpp
+)
+
+openpods_add_test(tst_handoffstate
+    tst_handoffstate.cpp
+    ../handoffstate.hpp
+    ../audiosource.hpp
+)

@@ -17,6 +17,8 @@
 
 // Long enough to outlast an ANC or transparency reconfigure, short enough not to strand playback.
 static constexpr int bothPodsOutSettleMs = 1200;
+// A player answers the daemon's own Pause or Play well inside this; later reports are the user's again.
+static constexpr qint64 selfInitiatedWindowMs = 1500;
 
 MediaController::MediaController(QObject *parent) : QObject(parent) {
   m_pulseAudio = new PulseAudioController(this);
@@ -143,8 +145,35 @@ void MediaController::followMediaChanges() {
           {
             LOG_DEBUG("Playback status changed: " << status);
             MediaState state = mediaStateFromPlayerctlOutput(status);
-            emit mediaStateChanged(state);
+            MediaOrigin origin = User;
+            if (m_selfInitiatedTimer.isValid() && m_selfInitiatedTimer.elapsed() < selfInitiatedWindowMs
+                && state == m_selfInitiatedState) {
+              origin = Daemon;
+              m_selfInitiatedTimer.invalidate();
+            }
+            emit mediaStateChanged(state, origin);
           });
+}
+
+void MediaController::markSelfInitiated(MediaState expected) {
+  m_selfInitiatedState = expected;
+  m_selfInitiatedTimer.restart();
+}
+
+void MediaController::rememberDefaultSinkForInterruption() {
+  m_defaultSinkAtInterruption = m_pulseAudio->getDefaultSink();
+  LOG_DEBUG("Default sink at interruption: " << m_defaultSinkAtInterruption);
+}
+
+void MediaController::reclaimDefaultSinkAfterInterruption() {
+  if (!m_defaultSinkAtInterruption.contains(connectedDeviceMacAddress, Qt::CaseInsensitive)) {
+    LOG_INFO("Default sink is " << m_defaultSinkAtInterruption << " since the interruption, not reclaiming it for the pods");
+    activateA2dpProfileWithRetry(connectedDeviceMacAddress);
+    return;
+  }
+  // The sink comes back with the profile, so the activation chain does the actual set-default.
+  m_reclaimDefaultSinkPending = true;
+  activateA2dpProfileWithRetry(connectedDeviceMacAddress);
 }
 
 bool MediaController::isActiveOutputDeviceAirPods() {
@@ -289,14 +318,16 @@ bool MediaController::activateA2dpProfile() {
     LOG_INFO("Profile activated: " << preferredProfile);
   }
 
-  // One default-sink claim per session: WirePlumber then re-links every untargeted stream itself, and sink inputs are never moved here because a moved stream is pinned to the pods for good.
-  if (m_followOnConnect && !m_defaultSinkClaimedThisSession) {
+  // One default-sink claim per session (plus a reclaim after an interruption): WirePlumber then re-links every untargeted
+  // stream itself, and sink inputs are never moved here because a moved stream is pinned to the pods for good.
+  if ((m_followOnConnect && !m_defaultSinkClaimedThisSession) || m_reclaimDefaultSinkPending) {
     const QString podsSink = m_pulseAudio->getSinkForDevice(connectedDeviceMacAddress);
     if (podsSink.isEmpty()) {
       LOG_WARN("No sink carries " << connectedDeviceMacAddress << " yet, audio cannot follow the pods");
     } else if (m_pulseAudio->setDefaultSink(podsSink)) {
       LOG_INFO("Default sink set to " << podsSink << " so audio follows the pods");
       m_defaultSinkClaimedThisSession = true;
+      m_reclaimDefaultSinkPending = false;
     } else {
       LOG_WARN("Could not make " << podsSink << " the default sink");
     }
@@ -453,6 +484,7 @@ void MediaController::play()
     return;
   }
 
+  markSelfInitiated(Playing);
   QDBusConnection bus = QDBusConnection::sessionBus();
   int resumedCount = 0;
 
@@ -495,10 +527,11 @@ void MediaController::play()
 
 void MediaController::pause()
 {
+  markSelfInitiated(Paused);
   QDBusConnection bus = QDBusConnection::sessionBus();
   QStringList services = bus.interface()->registeredServiceNames().value();
 
-  pausedByAppServices.clear();
+  // Additive on purpose: an ear-detection pause followed by a phone interruption must keep the first set to resume.
   int pausedCount = 0;
 
   for (const QString &service : services)
@@ -531,7 +564,10 @@ void MediaController::pause()
     if (reply.isValid())
     {
       LOG_INFO("Paused playback for: " << service);
-      pausedByAppServices << service;
+      if (!pausedByAppServices.contains(service))
+      {
+        pausedByAppServices << service;
+      }
       pausedCount++;
     }
     else

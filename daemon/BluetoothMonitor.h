@@ -17,6 +17,8 @@ public:
 
     bool checkAlreadyConnectedDevices();
     void probeDeviceConnected(const QString &macAddress, quint64 requestId);
+    // The paired device that advertises the AAP service, for a connect or disconnect before any link has told us the address.
+    QString findPairedAirPodsAddress();
 
 signals:
     void deviceConnected(const QString &macAddress, const QString &deviceName);
@@ -29,6 +31,7 @@ private slots:
     // — QDBusContext::message() is only populated on outgoing service-side
     // calls, not on incoming signal dispatch.
     void onPropertiesChanged(const QDBusMessage &message);
+    void onInterfacesAdded(const QDBusMessage &message);
 
 private:
     QDBusConnection m_dbus;

@@ -56,6 +56,9 @@
 #include "verbtable.hpp"
 #include "settingsreassert.hpp"
 #include "podsettings.hpp"
+#include "audiosource.hpp"
+#include "handoffstate.hpp"
+#include <QElapsedTimer>
 
 using namespace AirpodsTrayApp::Enums;
 
@@ -88,6 +91,7 @@ public:
         restrictSettingsAccess();
 
         m_notifier->setEnabled(loadNotificationsEnabled());
+        m_clock.start();
         connect(m_notifier, &Notifier::enabledChanged, this, &AirPodsTrayApp::saveNotificationsEnabled);
         connect(m_notifier, &Notifier::enabledChanged, this, &AirPodsTrayApp::notificationsEnabledChanged);
         connect(m_deviceInfo, &DeviceInfo::batteryStatusChanged, this, &AirPodsTrayApp::checkLowBatteryThresholds);
@@ -287,13 +291,28 @@ public slots:
     // the daemon hasn't learned an address yet (initial pairing not
     // done). The connect path also triggers the existing
     // bluezDeviceConnected handler, which re-runs the AAP handshake.
+    // The address a verb should act on: the live link's, else the paired device BlueZ lists with the AAP service, else the last one seen.
+    QString getAirPodsAddress() {
+        if (m_deviceInfo && !m_deviceInfo->bluetoothAddress().isEmpty()) {
+            return m_deviceInfo->bluetoothAddress();
+        }
+        if (monitor) {
+            const QString paired = monitor->findPairedAirPodsAddress();
+            if (!paired.isEmpty()) {
+                m_lastAirPodsAddress = paired;
+                return paired;
+            }
+        }
+        return m_lastAirPodsAddress;
+    }
+
     // Setters answer with the refusal text a verb prints, or an empty string once the request went out.
     QString disconnectAirPods() {
-        if (!m_deviceInfo || m_deviceInfo->bluetoothAddress().isEmpty()) {
+        const QString addr = getAirPodsAddress();
+        if (addr.isEmpty()) {
             LOG_WARN("disconnectAirPods: no current address to disconnect");
             return QStringLiteral("no AirPods address is known yet");
         }
-        const QString addr = m_deviceInfo->bluetoothAddress();
         LOG_INFO("disconnectAirPods: " << addr);
         ++m_disconnectCallsTotal;
         m_disconnectRequested = true;
@@ -318,11 +337,11 @@ public slots:
     }
 
     QString connectAirPods() {
-        if (!m_deviceInfo || m_deviceInfo->bluetoothAddress().isEmpty()) {
+        const QString addr = getAirPodsAddress();
+        if (addr.isEmpty()) {
             LOG_WARN("connectAirPods: no current address to connect");
             return QStringLiteral("no AirPods address is known yet");
         }
-        const QString addr = m_deviceInfo->bluetoothAddress();
         LOG_INFO("connectAirPods: " << addr);
         ++m_connectCallsTotal;
         auto *proc = new QProcess(this);
@@ -353,11 +372,11 @@ public slots:
     // the Qt event loop on bluetoothctl's IO. The address comes from
     // DeviceInfo; refuses if no device is currently associated.
     QString forgetDevice() {
-        if (!m_deviceInfo || m_deviceInfo->bluetoothAddress().isEmpty()) {
+        const QString addr = getAirPodsAddress();
+        if (addr.isEmpty()) {
             LOG_WARN("forgetDevice: no current device address to forget");
             return QStringLiteral("no AirPods address is known yet");
         }
-        const QString addr = m_deviceInfo->bluetoothAddress();
         LOG_INFO("Forgetting device: " << addr);
         ++m_forgetCallsTotal;
         auto *proc = new QProcess(this);
@@ -1044,6 +1063,12 @@ private slots:
             LOG_DEBUG("AIRPODS_DISCONNECTED packet written: " << AirPodsPackets::Connection::AIRPODS_DISCONNECTED.toHex());
         }
 
+        // The pods are gone, so playback that was on them stops rather than jumping to the speakers.
+        if (mediaController->getCurrentMediaState() == MediaController::MediaState::Playing)
+        {
+            LOG_INFO("AirPods disconnected while playing, pausing playback here");
+            mediaController->pause();
+        }
         // Clear the device name and model
         m_deviceInfo->reset();
         m_bleManager->startScan();
@@ -1441,7 +1466,18 @@ private slots:
         else if (data.startsWith(AirPodsPackets::Parse::FEATURES_ACK))
         {
             m_connectedBannerPending = true;
+            // The audio-source frame names hosts by byte-reversed MAC, so this box's own is cached per link.
+            m_localReversedMac = OpenPods::AudioSource::reversedMac(QBluetoothLocalDevice().address().toString());
             writePacketToSocket(requestNotificationsPacket(), "Request notifications packet written: ");
+            // Pods coming out of the case while something plays here should land on this box, so claim them now.
+            if (mediaController->getCurrentMediaState() == MediaController::MediaState::Playing)
+            {
+                m_handoff.onLocalMedia(true, OpenPods::Handoff::Origin::User);
+                if (writePacketToSocket(AirPodsPackets::OwnsConnection::CLAIM, "Handoff CLAIM packet written on connect: "))
+                {
+                    m_handoff.noteClaimSent(m_clock.elapsed());
+                }
+            }
 
             QTimer::singleShot(2000, this, [this]() {
                 if (m_deviceInfo->batteryStatus().isEmpty()) {
@@ -1537,6 +1573,10 @@ private slots:
                 m_deviceInfo->setOneBudANCMode(value.value());
                 LOG_DEBUG("One Bud ANC mode received: " << m_deviceInfo->oneBudANCMode());
             }
+        }
+        else if (data.startsWith(OpenPods::AudioSource::HEADER))
+        {
+            handleAudioSource(data);
         }
         else
         {
@@ -1745,17 +1785,87 @@ public:
     bool loadFollowOnConnect() const { return m_settings->value("audio/followOnConnect", true).toBool(); }
     void saveFollowOnConnect(bool follow) { m_settings->setValue("audio/followOnConnect", follow); mediaController->setFollowOnConnect(follow); }
 
-public:
-    void handleMediaStateChange(MediaController::MediaState state) {
-        // Grabbing the pods off whatever holds them is the cross-device feature, not a
-        // side effect of local playback: without this gate the box fights Apple's own
-        // automatic switching and the pods flap between here and the other device.
-        if (state == MediaController::MediaState::Playing && CrossDevice.isEnabled) {
-            LOG_INFO("Media started playing, taking over audio for cross-device");
-            sendDisconnectRequestToAndroid();
-            connectToAirPods(true);
+    void handleAudioSource(const QByteArray &data)
+    {
+        const std::optional<OpenPods::AudioSource::Info> info = OpenPods::AudioSource::parse(data);
+        if (!info)
+        {
+            LOG_WARN("Audio source frame too short: " << data.toHex());
+            return;
         }
+        const bool otherDevice = info->deviceMac != m_localReversedMac;
+        m_lastAudioSource = *info;
+        m_lastAudioSourceOther = otherDevice;
+        const OpenPods::Handoff::SourceDecision decision = m_handoff.onAudioSource(otherDevice, info->type, m_clock.elapsed());
+        LOG_INFO(decision.logLine << " (device " << OpenPods::AudioSource::macTail(info->deviceMac) << ")");
+        switch (decision.action)
+        {
+        case OpenPods::Handoff::Action::Interrupt:
+            mediaController->rememberDefaultSinkForInterruption();
+            mediaController->pause();
+            break;
+        case OpenPods::Handoff::Action::Resume:
+            // The interruption stands until the reclaim went out, so a closed link tries again on the next frame.
+            if (!areAirpodsConnected())
+            {
+                LOG_WARN("Cannot reclaim the pods: control link is not connected");
+                break;
+            }
+            if (writePacketToSocket(AirPodsPackets::OwnsConnection::CLAIM, "Handoff CLAIM packet written on release: "))
+            {
+                m_handoff.noteClaimSent(m_clock.elapsed());
+                m_handoff.noteResumed();
+                mediaController->reclaimDefaultSinkAfterInterruption();
+                mediaController->play();
+            }
+            break;
+        case OpenPods::Handoff::Action::Ignore:
+            break;
+        }
+        emit airPodsStatusChanged();
     }
+
+public:
+    void handleMediaStateChange(MediaController::MediaState state, MediaController::MediaOrigin origin) {
+        const bool playing = state == MediaController::MediaState::Playing;
+        const OpenPods::Handoff::Origin who = origin == MediaController::Daemon ? OpenPods::Handoff::Origin::Daemon
+                                                                                : OpenPods::Handoff::Origin::User;
+        const OpenPods::Handoff::MediaDecision decision = m_handoff.onLocalMedia(playing, who);
+        LOG_DEBUG(decision.logLine);
+        if (decision.wire == OpenPods::Handoff::Wire::Claim)
+        {
+            if (areAirpodsConnected())
+            {
+                if (writePacketToSocket(AirPodsPackets::OwnsConnection::CLAIM, "Handoff CLAIM packet written: "))
+                {
+                    m_handoff.noteClaimSent(m_clock.elapsed());
+                }
+                if (!mediaController->isActiveOutputDeviceAirPods())
+                {
+                    mediaController->activateA2dpProfileWithRetry(m_deviceInfo->bluetoothAddress().replace(":", "_"));
+                }
+            }
+            else if (loadConnectOnPlay())
+            {
+                // Off by default: pulling the pods off the phone on every local play is what fights Apple's own switching.
+                LOG_INFO("Media started here with the pods away, connecting them (handoff:connectonplay is on)");
+                connectAirPods();
+            }
+            // The Android side channel is a separate feature with its own default-off gate.
+            if (CrossDevice.isEnabled) {
+                sendDisconnectRequestToAndroid();
+                connectToAirPods(true);
+            }
+        }
+        else if (decision.wire == OpenPods::Handoff::Wire::Release && areAirpodsConnected())
+        {
+            writePacketToSocket(AirPodsPackets::OwnsConnection::RELEASE, "Handoff RELEASE packet written: ");
+        }
+        emit airPodsStatusChanged();
+    }
+
+    bool loadConnectOnPlay() const { return m_settings->value("handoff/connectOnPlay", false).toBool(); }
+    void saveConnectOnPlay(bool on) { m_settings->setValue("handoff/connectOnPlay", on); }
 
     void sendDisconnectRequestToAndroid()
     {
@@ -1905,6 +2015,12 @@ private:
     // Armed at FEATURES_ACK and spent on the first battery frame, which is when the banner has numbers to show.
     bool m_connectedBannerPending = false;
     static constexpr int connectedBannerTimeoutMs = 5000;
+    // Handoff with the other devices that share the pods, driven by the audio-source frames and local playback edges.
+    OpenPods::Handoff::State m_handoff;
+    QElapsedTimer m_clock;
+    QByteArray m_localReversedMac;
+    std::optional<OpenPods::AudioSource::Info> m_lastAudioSource;
+    bool m_lastAudioSourceOther = false;
     // CC 0x0A toggles ear detection on the buds themselves; the host-side pause policy is separate.
     static constexpr quint8 earDetectionConfigId = 0x0A;
     static constexpr quint8 controlCommandOff = 0x02;
@@ -2021,6 +2137,14 @@ public:
         status.insert("notifications_enabled", m_notifier->enabled());
         status.insert("notifications_connected", loadConnectedBannerEnabled());
         status.insert("audio_follow_on_connect", mediaController->followOnConnect());
+        QJsonObject audioSource;
+        audioSource.insert("type", m_lastAudioSource ? OpenPods::AudioSource::typeName(m_lastAudioSource->type) : QStringLiteral("unknown"));
+        audioSource.insert("other_device", m_lastAudioSourceOther);
+        status.insert("audio_source", audioSource);
+        status.insert("handoff_claims_total", m_handoff.claimsTotal());
+        status.insert("handoff_interruptions_total", m_handoff.interruptionsTotal());
+        status.insert("handoff_interrupted", m_handoff.interrupted());
+        status.insert("handoff_connect_on_play", loadConnectOnPlay());
         // Each setting reads from the echo when the pods sent one, else from the persisted wish; absent means neither.
         for (const OpenPods::PodSettings::Spec &spec : OpenPods::PodSettings::table()) {
             const std::optional<QByteArray> bytes = currentSettingBytes(spec.id);
@@ -2408,6 +2532,8 @@ int main(int argc, char *argv[]) {
                 }
             } else if (parsed.verb == QLatin1String("follow")) {
                 trayAppPtr->saveFollowOnConnect(parsed.choice == QLatin1String("on"));
+            } else if (parsed.verb == QLatin1String("handoff")) {
+                trayAppPtr->saveConnectOnPlay(parsed.choice.endsWith(QLatin1String(":on")));
             } else if (const auto spec = OpenPods::PodSettings::forVerb(parsed.verb)) {
                 refusal = trayAppPtr->setPodSetting(*spec, parsed);
             } else {

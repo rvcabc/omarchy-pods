@@ -1,6 +1,7 @@
 #ifndef MEDIACONTROLLER_H
 #define MEDIACONTROLLER_H
 
+#include <QElapsedTimer>
 #include <QObject>
 #include "pulseaudiocontroller.h"
 #include "../conversationlevel.hpp"
@@ -22,6 +23,13 @@ public:
     Stopped
   };
   Q_ENUM(MediaState)
+  // Who caused a playback transition: the daemon's own pause and resume must not read as the user's.
+  enum MediaOrigin
+  {
+    User,
+    Daemon
+  };
+  Q_ENUM(MediaOrigin)
   enum EarDetectionBehavior
   {
     PauseWhenOneRemoved,
@@ -56,9 +64,12 @@ public:
   void play();
   void pause();
   MediaState getCurrentMediaState() const;
+  // Another device took the pods: remember where audio was, so the reclaim restores only a default the pods held.
+  void rememberDefaultSinkForInterruption();
+  void reclaimDefaultSinkAfterInterruption();
 
 Q_SIGNALS:
-  void mediaStateChanged(MediaState state);
+  void mediaStateChanged(MediaState state, MediaOrigin origin);
 
 private:
   MediaState mediaStateFromPlayerctlOutput(const QString &output) const;
@@ -89,6 +100,13 @@ private:
   QTimer *m_conversationRestoreTimer = nullptr;
   bool m_followOnConnect = true;
   bool m_defaultSinkClaimedThisSession = false;
+  // The next profile activation makes the pods default again after an interruption the user did not move away from.
+  bool m_reclaimDefaultSinkPending = false;
+  QString m_defaultSinkAtInterruption;
+  // Set by the daemon's own pause() and play(); the matching MPRIS report within the window reads as Daemon origin.
+  void markSelfInitiated(MediaState expected);
+  MediaState m_selfInitiatedState = Stopped;
+  QElapsedTimer m_selfInitiatedTimer;
 };
 
 #endif // MEDIACONTROLLER_H
