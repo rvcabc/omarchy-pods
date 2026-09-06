@@ -60,14 +60,16 @@ Panel {
   readonly property var modes: pods.availableModes()
 
   // Rebuilt whenever a section appears, so j and k never land on a hidden control.
+  // Settings is reachable with the pods in the case or the daemon down, which is when the gate text matters.
   readonly property var cursorRows: {
     var rows = []
-    if (!pods.hasAirPods) return rows
+    if (!pods.hasAirPods) { rows.push("settings"); return rows }
     for (var i = 0; i < modes.length; i++) rows.push("mode:" + modes[i])
     if (adaptiveVisible) rows.push("adaptive")
     if (caVisible) rows.push("ca")
     if (oneBudVisible) rows.push("onebud")
     rows.push("ear")
+    rows.push("settings")
     return rows
   }
 
@@ -95,6 +97,12 @@ Panel {
     else if (name === "ca") pods.setConversationalAwareness(!pods.conversationalAwareness)
     else if (name === "onebud") pods.setOneBudANC(!pods.oneBudANC)
     else if (name === "ear") pods.cycleEarDetection()
+    else if (name === "settings") root.openSettings()
+  }
+
+  function openSettings() {
+    root.close()
+    settingsWindow.show()
   }
 
   function focusRow(name) {
@@ -121,6 +129,13 @@ Panel {
     settings: root.settings
   }
 
+  SettingsWindow {
+    id: settingsWindow
+    service: pods
+    anchorItem: button
+    fontFamily: root.fontFamily
+  }
+
   IpcHandler {
     target: root.ipcTarget
     function open(): void { root.open() }
@@ -129,6 +144,11 @@ Panel {
     function refresh(): string { pods.refresh(); return "ok" }
     function noise(): string { pods.cycleNoiseMode(); return "ok" }
     function status(): string { return Model.noiseModeName(pods.noiseMode) }
+    function settings(): string {
+      if (settingsWindow.open) settingsWindow.hide()
+      else root.openSettings()
+      return "ok"
+    }
   }
 
   BarIconButton {
@@ -176,6 +196,7 @@ Panel {
       onTextKey: function (t) {
         var key = String(t).toLowerCase()
         if (key === "r") pods.refresh()
+        else if (key === "s") root.openSettings()
         else if (!pods.hasAirPods) return
         // The mode keys need no capability check of their own: setNoiseMode drops a mode this device does not have.
         else if (key === "o") pods.setNoiseMode(Model.NOISE_OFF)
@@ -352,6 +373,24 @@ Panel {
               rowName: "ear"
               label: "Ear detection"
               value: Model.earDetectionName(pods.earDetectionBehavior)
+              onActivated: pods.cycleEarDetection()
+            }
+          }
+
+          PanelSeparator {
+            foreground: root.foreground
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.space(6)
+
+            ValueRow {
+              width: parent.width
+              rowName: "settings"
+              label: "Settings"
+              value: "s"
+              onActivated: root.openSettings()
             }
           }
 
@@ -586,6 +625,8 @@ Panel {
     property string label: ""
     property string value: ""
 
+    signal activated()
+
     hasCursor: root.rowHasCursor(rowName)
     foreground: root.foreground
     implicitHeight: valueLabel.implicitHeight + Style.spacing.rowPaddingX
@@ -595,7 +636,7 @@ Panel {
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       onEntered: root.focusRow(valueRow.rowName)
-      onClicked: pods.cycleEarDetection()
+      onClicked: valueRow.activated()
     }
 
     RowLayout {

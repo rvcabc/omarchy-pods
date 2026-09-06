@@ -69,7 +69,12 @@ function defaultStatus() {
     leftSerial: "",
     rightSerial: "",
     controlIdsSeen: [],
-    podSettings: {}
+    podSettings: {},
+    hearingGateReady: false,
+    audioSource: { type: "unknown", otherDevice: false },
+    handoffClaimsTotal: 0,
+    handoffInterruptionsTotal: 0,
+    handoffInterrupted: false
   }
 }
 
@@ -176,6 +181,12 @@ function parseStatus(raw) {
   status.rightSerial = String(parsed.right_serial || "")
   status.controlIdsSeen = Array.isArray(parsed.control_ids_seen) ? parsed.control_ids_seen : []
   status.podSettings = podSettingsFrom(parsed)
+  status.hearingGateReady = parsed.hearing_gate_ready === true
+  var source = parsed.audio_source && typeof parsed.audio_source === "object" ? parsed.audio_source : {}
+  status.audioSource = { type: String(source.type || "unknown"), otherDevice: source.other_device === true }
+  status.handoffClaimsTotal = intOr(parsed.handoff_claims_total, 0)
+  status.handoffInterruptionsTotal = intOr(parsed.handoff_interruptions_total, 0)
+  status.handoffInterrupted = parsed.handoff_interrupted === true
   return status
 }
 
@@ -236,6 +247,7 @@ function lidText(lidState) {
 }
 
 function podMeta(pod) {
+  if (pod.optimizedCharging) return "Optimized charging"
   if (pod.charging) return "Charging"
   if (pod.inEar) return "In ear"
   return ""
@@ -281,7 +293,16 @@ var SETTINGS = [
   { key: "allow_auto_connect", field: "allowAutoConnect", verb: "allowautoconnect", kind: "bool", choices: "", min: 0, max: 0, label: "Allow automatic connection", id: "0x36" },
   // Held under deviceName in the pending map; the top-level deviceName property is the daemon's live name and is never held.
   { key: "device_name", field: "deviceName", verb: "rename", kind: "text", choices: "", min: RENAME_MIN_BYTES, max: RENAME_MAX_BYTES, label: "Name", id: NO_CONTROL_ID },
-  { key: "custom_eq", field: "customEq", verb: "eq", kind: "eq", choices: "", min: EQ_BAND_MIN, max: EQ_BAND_MAX, label: "Custom EQ", id: NO_CONTROL_ID }
+  { key: "custom_eq", field: "customEq", verb: "eq", kind: "eq", choices: "", min: EQ_BAND_MIN, max: EQ_BAND_MAX, label: "Custom EQ", id: NO_CONTROL_ID },
+  // Daemon-side switches ride the same table: the verb family already carries its sub-verb, so boolVerb appends :on or :off.
+  { key: "notifications_enabled", field: "notificationsEnabled", verb: "notify", kind: "bool", choices: "", min: 0, max: 0, label: "Desktop notifications", id: NO_CONTROL_ID },
+  { key: "notifications_connected", field: "notificationsConnected", verb: "notify:connected", kind: "bool", choices: "", min: 0, max: 0, label: "Battery banner on connect", id: NO_CONTROL_ID },
+  { key: "audio_follow_on_connect", field: "audioFollowOnConnect", verb: "follow", kind: "bool", choices: "", min: 0, max: 0, label: "Audio follows the pods", id: NO_CONTROL_ID },
+  { key: "handoff_connect_on_play", field: "handoffConnectOnPlay", verb: "handoff:connectonplay", kind: "bool", choices: "", min: 0, max: 0, label: "Connect on play", id: NO_CONTROL_ID },
+  // Hearing rows exist behind the DeviceID gate; the daemon refuses them until the adapter identifies as Apple.
+  { key: "hearing_aid", field: "hearingAid", verb: "hearingaid", kind: "bool", choices: "", min: 0, max: 0, label: "Hearing Aid", id: "0x2C" },
+  { key: "hearing_assist", field: "hearingAssist", verb: "hearingassist", kind: "bool", choices: "", min: 0, max: 0, label: "Hearing Assistance", id: "0x33" },
+  { key: "loud_sound_reduction", field: "loudSoundReduction", verb: "lsr", kind: "bool", choices: "", min: 0, max: 0, label: "Loud Sound Reduction", id: NO_CONTROL_ID }
 ]
 
 function settingByKey(key) {

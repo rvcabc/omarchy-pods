@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.thisisgm.omapods",
   "name": "AirPods",
-  "version": "1.3.6",
+  "version": "1.4.0",
   "author": "GM",
   "license": "MIT",
-  "description": "AirPods in the Omarchy bar: per-pod and case battery, listening mode, adaptive noise level, conversation awareness, one-bud ANC and ear detection.",
+  "description": "AirPods in the Omarchy bar: per-pod and case battery, listening mode, adaptive noise level, conversation awareness, one-bud ANC and ear detection, plus a settings window for everything else macOS offers.",
   "kinds": [
     "bar-widget"
   ],

@@ -39,6 +39,11 @@ Item {
   property var podSettings: ({})
   // Control-command ids the pods echoed this session, as "0x34" strings.
   property var controlIdsSeen: []
+  property bool hearingGateReady: false
+  property var audioSource: ({ type: "unknown", otherDevice: false })
+  property int handoffClaimsTotal: 0
+  property int handoffInterruptionsTotal: 0
+  property bool handoffInterrupted: false
   property string lastError: ""
   property string actionStatus: ""
 
@@ -123,6 +128,11 @@ Item {
     leftSerial = status.leftSerial
     rightSerial = status.rightSerial
     controlIdsSeen = status.controlIdsSeen
+    hearingGateReady = status.hearingGateReady
+    audioSource = status.audioSource
+    handoffClaimsTotal = status.handoffClaimsTotal
+    handoffInterruptionsTotal = status.handoffInterruptionsTotal
+    handoffInterrupted = status.handoffInterrupted
 
     var now = Date.now()
     noiseMode = _settle("noiseMode", status.noiseMode, now)

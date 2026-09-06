@@ -146,7 +146,7 @@ for (const spec of Model.SETTINGS) {
   check(spec.key + " is found by key", Model.settingByKey(spec.key), spec)
   check(spec.key + " is found by field", Model.settingByField(spec.field), spec)
 }
-check("the table has every daemon setting", Model.SETTINGS.length, 18)
+check("the table has every daemon setting", Model.SETTINGS.length, 25)
 check("an unknown key is not found", Model.settingByKey("volume"), null)
 check("an unknown key makes no verb", Model.settingVerb("volume", 50), "")
 
@@ -271,7 +271,7 @@ check("both hold sides share one command", Model.settingConfirmed("hold_right", 
 check("rename needs no echo", Model.settingConfirmed("device_name", []), true)
 check("eq needs no echo", Model.settingConfirmed("custom_eq", []), true)
 check("an unknown key is never confirmed", Model.settingConfirmed("volume", ["0x34"]), false)
-check("rename and eq are the only rows without an id", Model.SETTINGS.filter(s => s.id === Model.NO_CONTROL_ID).map(s => s.key), ["device_name", "custom_eq"])
+check("rows without an id are the non-CC verbs and the daemon switches", Model.SETTINGS.filter(s => s.id === Model.NO_CONTROL_ID).map(s => s.key), ["device_name", "custom_eq", "notifications_enabled", "notifications_connected", "audio_follow_on_connect", "handoff_connect_on_play", "loud_sound_reduction"])
 
 // The new status keys, present: one line with every kind of setting, the echo list and the identity strings.
 const withSettings = Model.parseStatus('{"allow_off":true,"case":{"available":true,"charging":true,"level":100,"optimized_charging":true},"connected":true,"control_ids_seen":["0x0D","0x1A","0x34"],"custom_eq":{"enabled":true,"high":50,"low":40,"mid":45},"device_name":"My Pods","firmware_version":"7E93","hardware_revision":"1.0.0","hold_cycle_modes":7,"hold_left":"noise","hold_right":"siri","left":{"available":true,"charging":false,"in_ear":true,"level":79,"optimized_charging":true},"left_serial":"LEFTSERIAL","mic_mode":"auto","right":{"available":true,"charging":true,"in_ear":false,"level":100,"optimized_charging":false},"right_serial":"RIGHTSERIAL","schema_version":1,"serial_number":"CASESERIAL","tone_volume":40}')
@@ -289,12 +289,30 @@ check("right pod not optimized charging", withSettings.right.optimizedCharging, 
 check("a bool setting sent as a string is not true", Model.parseStatus('{"schema_version":1,"allow_off":"true"}').podSettings, { allow_off: false })
 check("an eq reported with the bands in daemon order compares equal to a click", Model.settle(eqHeld, "customEq", Model.parseStatus('{"schema_version":1,"custom_eq":{"enabled":true,"high":50,"low":50,"mid":50}}').podSettings.custom_eq, 2000).pending, {})
 
+// Daemon-side switches share the table, and their verbs already carry the sub-verb.
+check("notify verb", Model.settingVerb("notifications_enabled", false), "notify:off")
+check("notify connected verb", Model.settingVerb("notifications_connected", true), "notify:connected:on")
+check("follow verb", Model.settingVerb("audio_follow_on_connect", true), "follow:on")
+check("handoff verb", Model.settingVerb("handoff_connect_on_play", false), "handoff:connectonplay:off")
+check("hearing aid verb", Model.settingVerb("hearing_aid", true), "hearingaid:on")
+check("daemon switches count as confirmed", Model.settingConfirmed("audio_follow_on_connect", []), true)
+check("hearing aid waits for its echo", Model.settingConfirmed("hearing_aid", []), false)
+
+const handoff = Model.parseStatus('{"schema_version":1,"hearing_gate_ready":true,"audio_source":{"type":"media","other_device":true},"handoff_claims_total":3,"handoff_interruptions_total":1,"handoff_interrupted":true,"audio_follow_on_connect":false}')
+check("hearing gate parses", handoff.hearingGateReady, true)
+check("audio source parses", handoff.audioSource, { type: "media", otherDevice: true })
+check("handoff counters parse", [handoff.handoffClaimsTotal, handoff.handoffInterruptionsTotal, handoff.handoffInterrupted], [3, 1, true])
+check("follow switch lands in podSettings", handoff.podSettings.audio_follow_on_connect, false)
+check("optimized charging leads the pod meta", Model.podMeta({ level: 80, charging: true, inEar: false, optimizedCharging: true }), "Optimized charging")
+
 // The same keys absent: nothing is invented.
 // device_name predates the settings table, so the rename row is the one setting an older daemon reports.
 check("an older daemon reports only the name", good.podSettings, { device_name: "GM’s AirPods Pro" })
 check("an older daemon has no echo list", good.controlIdsSeen, [])
 check("an older daemon has no firmware version", good.firmwareVersion, "")
 check("an older daemon has no serials", [good.serialNumber, good.leftSerial, good.rightSerial], ["", "", ""])
+check("an older daemon has no hearing gate", good.hearingGateReady, false)
+check("an older daemon has an unknown audio source", good.audioSource, { type: "unknown", otherDevice: false })
 check("an older daemon's pods are not optimized charging", good.left.optimizedCharging, false)
 check("the default pod is not optimized charging", Model.defaultPod().optimizedCharging, false)
 check("an unavailable pod is not optimized charging", Model.podFrom({ available: false, optimized_charging: true }).optimizedCharging, false)
